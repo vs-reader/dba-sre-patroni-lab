@@ -1,0 +1,86 @@
+---
+- name: Verify etcd, Patroni roles and replication
+  hosts: database
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Read etcd health
+      ansible.builtin.command: etcdctl --endpoints=http://127.0.0.1:2379 endpoint health --cluster -w json
+      register: etcd_health
+      changed_when: false
+      run_once: true
+
+    - name: Require three healthy etcd members
+      ansible.builtin.assert:
+        that:
+          - etcd_health.stdout | from_json | selectattr('health') | list | length == 3
+        fail_msg: "Not all three etcd members are healthy"
+      run_once: true
+
+    - name: Read the Patroni cluster state
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_api_port }}/cluster"
+      register: patroni_cluster
+      until: patroni_cluster.json.members | selectattr('state', 'eq', 'streaming') | list | length == 2
+      retries: 12
+      delay: 5
+      failed_when: false
+      run_once: true
+
+    - name: Require one leader and two streaming replicas
+      ansible.builtin.assert:
+        that:
+          - members | length == 3
+          - members | selectattr('role', 'eq', 'leader') | list | length == 1
+          - members | selectattr('role', 'eq', 'replica') | selectattr('state', 'eq', 'streaming') | list | length == 2
+        fail_msg: "Expected one leader and two streaming replicas"
+      vars:
+        members: "{{ patroni_cluster.json.members }}"
+      run_once: true
+
+    - name: Remember the leader
+      ansible.builtin.set_fact:
+        leader: "{{ (patroni_cluster.json.members | selectattr('role', 'eq', 'leader') | first).name }}"
+      run_once: true
+
+    - name: Write a probe row on the leader
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -p{{ pg_port }}
+          - -XAtqc
+          - >-
+            CREATE TABLE IF NOT EXISTS lab_probe (id bigserial PRIMARY KEY, node text, created_at timestamptz DEFAULT now());
+            INSERT INTO lab_probe (node) VALUES ('{{ leader }}') RETURNING id
+      become_user: postgres
+      delegate_to: "{{ leader }}"
+      register: probe
+      changed_when: false
+      run_once: true
+
+    - name: Check recovery state and the probe row on every node
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -p{{ pg_port }}
+          - -XAtqc
+          - "SELECT pg_is_in_recovery(), count(*) FROM lab_probe WHERE id = {{ probe.stdout }}"
+      become_user: postgres
+      register: node_state
+      until: node_state.stdout.endswith('|1')
+      retries: 10
+      delay: 1
+      changed_when: false
+
+    - name: Require read-write on the leader and recovery on replicas
+      ansible.builtin.assert:
+        that:
+          - node_state.stdout == ('f|1' if inventory_hostname == leader else 't|1')
+        fail_msg: "Unexpected recovery state: {{ node_state.stdout }}"
+
+    - name: Show cluster members
+      ansible.builtin.debug:
+        msg: "{{ patroni_cluster.json.members | map(attribute='name') | zip(patroni_cluster.json.members | map(attribute='role'), patroni_cluster.json.members | map(attribute='state')) | map('join', ' ') | list }}"
+      run_once: true

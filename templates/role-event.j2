@@ -1,0 +1,45 @@
+#!/usr/bin/python3
+# Patroni on_role_change callback: arguments are action, role and cluster.
+# Every call goes to the journal. A Grafana annotation is added only when
+# this node becomes the leader, so one leader change gives one mark.
+import json
+import sys
+import syslog
+import time
+import urllib.request
+from pathlib import Path
+
+NODE = "{{ inventory_hostname }}"
+GRAFANA_URL = "{{ grafana_url }}"
+TOKEN_FILE = Path("/etc/patroni/grafana-token")
+STATE_FILE = Path("/var/lib/postgresql/role-event.last")
+
+action, role, cluster = sys.argv[1:4]
+previous = STATE_FILE.read_text().strip() if STATE_FILE.exists() else "none"
+STATE_FILE.write_text(role + "\n")
+
+syslog.openlog("patroni-role")
+syslog.syslog(f"action={action} node={NODE} role={role} previous={previous} cluster={cluster}")
+
+if role != "primary" or previous == "primary" or not TOKEN_FILE.exists():
+    sys.exit(0)
+
+annotation = {
+    "dashboardUID": "patroni-ha",
+    "time": int(time.time() * 1000),
+    "tags": ["patroni", "leader-change", cluster],
+    "text": f"{NODE} is the new leader of {cluster}",
+}
+request = urllib.request.Request(
+    f"{GRAFANA_URL}/api/annotations",
+    data=json.dumps(annotation).encode(),
+    headers={
+        "Authorization": "Bearer " + TOKEN_FILE.read_text().strip(),
+        "Content-Type": "application/json",
+    },
+)
+try:
+    urllib.request.urlopen(request, timeout=3)
+    syslog.syslog(f"grafana annotation added: {NODE} is the new leader")
+except Exception as error:
+    syslog.syslog(syslog.LOG_WARNING, f"grafana annotation failed: {error}")

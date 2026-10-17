@@ -1,0 +1,40 @@
+---
+- name: Show role change events in the journal
+  hosts: database
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read patroni-role journal entries
+      ansible.builtin.command: journalctl -t patroni-role --since "-2h" -o short-iso --no-pager
+      register: role_events
+      changed_when: false
+
+    - name: Print journal entries
+      ansible.builtin.debug:
+        var: role_events.stdout_lines
+
+- name: Show leader change annotations in Grafana
+  hosts: monitoring
+  gather_facts: false
+  tasks:
+    - name: Read recent annotations
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:3000/api/annotations?dashboardUID=patroni-ha&tags=leader-change&limit=10"
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.file', 'credentials/grafana-token') }}"
+      register: annotations
+      no_log: true
+
+    - name: Read recent Ansible run annotations
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:3000/api/annotations?tags=ansible&limit=10"
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.file', 'credentials/grafana-token') }}"
+      register: ansible_runs
+      no_log: true
+
+    - name: Print annotations
+      ansible.builtin.debug:
+        msg:
+          leader_changes: "{{ annotations.json | map(attribute='text') | list }}"
+          ansible_runs: "{{ ansible_runs.json | map(attribute='text') | list }}"

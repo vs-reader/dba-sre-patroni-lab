@@ -1,0 +1,36 @@
+---
+- name: Planned switchover
+  hosts: database
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Switch the leader to the candidate
+      ansible.builtin.command: "patronictl -c /etc/patroni/config.yml switchover --candidate {{ candidate }} --force"
+      become_user: postgres
+      run_once: true
+
+    - name: Wait for the new leader and two streaming replicas
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[candidate].ansible_host }}:{{ patroni_api_port }}/cluster"
+      register: cluster_state
+      until:
+        - cluster_state.json is defined
+        - cluster_state.json.members | selectattr('role', 'eq', 'leader') | map(attribute='name') | list == [candidate]
+        - cluster_state.json.members | selectattr('state', 'eq', 'streaming') | list | length == 2
+      retries: 30
+      delay: 2
+      run_once: true
+
+    - name: Show cluster members
+      ansible.builtin.command: patronictl -c /etc/patroni/config.yml list
+      become_user: postgres
+      register: patroni_list
+      changed_when: false
+      run_once: true
+
+    - name: Print cluster members
+      ansible.builtin.debug:
+        var: patroni_list.stdout_lines
+      run_once: true

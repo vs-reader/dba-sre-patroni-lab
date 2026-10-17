@@ -1,0 +1,29 @@
+---
+- name: Start or stop the cluster
+  hosts: database
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Set service state
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: "{{ lab_state }}"
+        enabled: "{{ lab_state == 'started' }}"
+      loop: "{{ ['etcd', 'patroni'] if lab_state == 'started' else ['patroni', 'etcd'] }}"
+      when: item == 'patroni' or etcd_install
+
+- name: Start or stop monitoring
+  hosts: monitoring
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Set service state
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: "{{ lab_state }}"
+        enabled: "{{ lab_state == 'started' }}"
+      loop:
+        - prometheus
+        - grafana-server

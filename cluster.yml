@@ -1,0 +1,202 @@
+---
+- name: Mark the start of the change in Grafana
+  hosts: monitoring
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Add a Grafana annotation for this run
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/annotations"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ grafana_token }}"
+        body_format: json
+        body:
+          tags: [ansible, cluster.yml]
+          text: "Ansible cluster.yml started, commit {{ git_commit }}"
+      register: run_annotation
+      when: grafana_token | length > 0
+      ignore_errors: true
+      no_log: true
+
+    - name: Report an unavailable Grafana
+      ansible.builtin.debug:
+        msg: "Grafana is unavailable, this run is not marked: {{ run_annotation.msg | default('') }}"
+      when: run_annotation is failed
+
+- name: Configure etcd, PostgreSQL and Patroni
+  hosts: database
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars_files:
+    - vars.yml
+  pre_tasks:
+    - name: Require three database nodes
+      ansible.builtin.assert:
+        that:
+          - groups['database'] | length == 3
+        fail_msg: "The database group must contain exactly three nodes"
+      run_once: true
+
+    - name: Check for an existing PostgreSQL 17 main cluster
+      ansible.builtin.stat:
+        path: /etc/postgresql/17/main
+      register: main_cluster
+
+    - name: Check for existing etcd data
+      ansible.builtin.stat:
+        path: /var/lib/etcd/default/member
+      register: etcd_data
+
+    - name: Check the lab marker
+      ansible.builtin.stat:
+        path: /etc/dba-sre-lesson5
+      register: lab_marker
+
+    - name: Refuse nodes that already run other clusters
+      ansible.builtin.assert:
+        that:
+          - pg_port != 5432 or not main_cluster.stat.exists
+          - not etcd_install or not etcd_data.stat.exists or lab_marker.stat.exists
+        fail_msg: "This node already has PostgreSQL 17/main or etcd data from another setup"
+
+  tasks:
+    - name: Mark the node as a lesson 5 lab node
+      ansible.builtin.copy:
+        dest: /etc/dba-sre-lesson5
+        content: "Managed by dba-sre patroni-lab\n"
+        mode: '0644'
+
+    - name: Create PostgreSQL cluster defaults directory
+      ansible.builtin.file:
+        path: /etc/postgresql-common/createcluster.d
+        state: directory
+        mode: '0755'
+
+    - name: Do not create the default PostgreSQL cluster
+      ansible.builtin.copy:
+        dest: /etc/postgresql-common/createcluster.d/no-main-cluster.conf
+        content: "create_main_cluster = false\n"
+        mode: '0644'
+
+    - name: Pin package versions in APT
+      ansible.builtin.template:
+        src: apt-pin.pref.j2
+        dest: "/etc/apt/preferences.d/dba-sre-{{ item.name }}.pref"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ cluster_packages }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Install pinned packages
+      ansible.builtin.apt:
+        name: "{{ cluster_packages | map(attribute='name') | zip(cluster_packages | map(attribute='version')) | map('join', '=') | list }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        install_recommends: false
+        allow_downgrade: false
+        policy_rc_d: 101
+
+    - name: Configure etcd
+      ansible.builtin.copy:
+        dest: /etc/default/etcd
+        mode: '0644'
+        content: |
+          ETCD_NAME={{ inventory_hostname }}
+          ETCD_DATA_DIR=/var/lib/etcd/default
+          ETCD_LISTEN_PEER_URLS=http://{{ ansible_host }}:2380
+          ETCD_LISTEN_CLIENT_URLS=http://{{ ansible_host }}:2379,http://127.0.0.1:2379
+          ETCD_ADVERTISE_CLIENT_URLS=http://{{ ansible_host }}:2379
+          ETCD_INITIAL_ADVERTISE_PEER_URLS=http://{{ ansible_host }}:2380
+          ETCD_INITIAL_CLUSTER={% for host in groups['database'] %}{{ host }}=http://{{ hostvars[host].ansible_host }}:2380{{ ',' if not loop.last }}{% endfor %}
+
+          ETCD_INITIAL_CLUSTER_TOKEN={{ cluster_name }}-etcd
+          ETCD_INITIAL_CLUSTER_STATE=new
+      when: etcd_install
+      notify: Restart etcd
+
+    - name: Apply etcd configuration now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start etcd
+      ansible.builtin.systemd_service:
+        name: etcd
+        state: started
+        enabled: true
+      when: etcd_install
+
+    - name: Create PostgreSQL data parent directory
+      ansible.builtin.file:
+        path: /var/lib/postgresql/17
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0755'
+
+    - name: Install the role change callback
+      ansible.builtin.template:
+        src: role-event.j2
+        dest: /usr/local/bin/role-event
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Write Patroni configuration
+      ansible.builtin.template:
+        src: patroni.yml.j2
+        dest: /etc/patroni/config.yml
+        owner: postgres
+        group: postgres
+        mode: '0600'
+      diff: false
+      notify: Reload Patroni
+
+    - name: Start Patroni
+      ansible.builtin.systemd_service:
+        name: patroni
+        state: started
+        enabled: true
+
+    - name: Wait for PostgreSQL under Patroni
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:{{ patroni_api_port }}/health"
+      register: patroni_health
+      until: patroni_health.status == 200
+      retries: 30
+      delay: 5
+
+  handlers:
+    - name: Restart etcd
+      ansible.builtin.systemd_service:
+        name: etcd
+        state: restarted
+
+    - name: Reload Patroni
+      ansible.builtin.systemd_service:
+        name: patroni
+        state: reloaded
+
+- name: Mark the end of the change in Grafana
+  hosts: monitoring
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Close the Grafana annotation
+      ansible.builtin.uri:
+        url: "{{ grafana_url }}/api/annotations/{{ run_annotation.json.id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ grafana_token }}"
+        body_format: json
+        body:
+          timeEnd: "{{ (now().timestamp() * 1000) | int }}"
+          text: "Ansible cluster.yml finished, commit {{ git_commit }}"
+      when: run_annotation.json.id is defined
+      ignore_errors: true
+      no_log: true

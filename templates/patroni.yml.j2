@@ -1,0 +1,51 @@
+scope: {{ cluster_name }}
+name: {{ inventory_hostname }}
+
+restapi:
+  listen: {{ ansible_host }}:{{ patroni_api_port }}
+  connect_address: {{ ansible_host }}:{{ patroni_api_port }}
+  authentication:
+    username: patroni
+    password: {{ lookup('ansible.builtin.password', 'credentials/patroni-api chars=ascii_letters,digits length=24') }}
+
+etcd3:
+  hosts: {% for host in groups['database'] %}{{ hostvars[host].ansible_host }}:2379{{ ',' if not loop.last }}{% endfor %}
+
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+postgresql:
+  listen: {{ ansible_host }}:{{ pg_port }}
+  connect_address: {{ ansible_host }}:{{ pg_port }}
+  data_dir: /var/lib/postgresql/17/{{ cluster_name }}
+  bin_dir: /usr/lib/postgresql/17/bin
+  authentication:
+    superuser:
+      username: postgres
+      password: {{ lookup('ansible.builtin.password', 'credentials/postgres chars=ascii_letters,digits length=24') }}
+    replication:
+      username: replicator
+      password: {{ lookup('ansible.builtin.password', 'credentials/replicator chars=ascii_letters,digits length=24') }}
+  pg_hba:
+    - local all all peer
+{% for host in groups['database'] %}
+    - host replication replicator {{ hostvars[host].ansible_host }}/32 scram-sha-256
+    - host all all {{ hostvars[host].ansible_host }}/32 scram-sha-256
+{% endfor %}
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+{% for name, value in postgresql_parameters.items() %}
+    {{ name }}: {{ value }}
+{% endfor %}
+  callbacks:
+    on_role_change: /usr/local/bin/role-event

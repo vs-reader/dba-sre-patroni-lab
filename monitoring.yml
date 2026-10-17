@@ -1,0 +1,196 @@
+---
+- name: Install Prometheus and Grafana on one node
+  hosts: monitoring
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Pin package versions in APT
+      ansible.builtin.template:
+        src: apt-pin.pref.j2
+        dest: "/etc/apt/preferences.d/dba-sre-{{ item.name }}.pref"
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - name: prometheus
+          version: "{{ prometheus_version }}"
+        - name: grafana
+          version: "{{ grafana_version }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Install Prometheus
+      ansible.builtin.apt:
+        name: "prometheus={{ prometheus_version }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        install_recommends: false
+        allow_downgrade: false
+        policy_rc_d: 101
+
+    - name: Listen on localhost only
+      ansible.builtin.copy:
+        dest: /etc/default/prometheus
+        mode: '0644'
+        content: |
+          ARGS="--web.listen-address=127.0.0.1:9090 --storage.tsdb.retention.time=2d"
+      notify: Restart Prometheus
+
+    - name: Scrape Patroni metrics
+      ansible.builtin.template:
+        src: prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        mode: '0644'
+        validate: promtool check config %s
+      notify: Restart Prometheus
+
+    - name: Start Prometheus
+      ansible.builtin.systemd_service:
+        name: prometheus
+        state: started
+        enabled: true
+
+    - name: Download Grafana package
+      ansible.builtin.get_url:
+        url: "{{ grafana_deb_url }}"
+        dest: /var/cache/apt/archives/grafana.deb
+        checksum: "sha256:{{ grafana_deb_sha256 }}"
+        mode: '0644'
+
+    - name: Install Grafana
+      ansible.builtin.apt:
+        deb: /var/cache/apt/archives/grafana.deb
+        policy_rc_d: 101
+
+    - name: Set Grafana admin password
+      ansible.builtin.copy:
+        dest: /etc/grafana/admin-password
+        content: "{{ lookup('ansible.builtin.password', 'credentials/grafana-admin chars=ascii_letters,digits length=20') }}"
+        owner: root
+        group: grafana
+        mode: '0640'
+      diff: false
+
+    - name: Configure Grafana
+      ansible.builtin.copy:
+        dest: /etc/grafana/grafana.ini
+        owner: root
+        group: grafana
+        mode: '0640'
+        content: |
+          [server]
+          http_addr = {{ grafana_http_addr }}
+          http_port = 3000
+
+          [security]
+          admin_user = admin
+          admin_password = $__file{/etc/grafana/admin-password}
+
+          [users]
+          allow_sign_up = false
+
+          [analytics]
+          reporting_enabled = false
+          check_for_updates = false
+          check_for_plugin_updates = false
+      notify: Restart Grafana
+
+    - name: Add Prometheus data source
+      ansible.builtin.copy:
+        dest: /etc/grafana/provisioning/datasources/prometheus.yml
+        owner: root
+        group: grafana
+        mode: '0640'
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              uid: prometheus
+              type: prometheus
+              url: http://127.0.0.1:9090
+              isDefault: true
+      notify: Restart Grafana
+
+    - name: Add dashboard provider
+      ansible.builtin.copy:
+        dest: /etc/grafana/provisioning/dashboards/patroni.yml
+        owner: root
+        group: grafana
+        mode: '0640'
+        content: |
+          apiVersion: 1
+          providers:
+            - name: patroni
+              options:
+                path: /etc/grafana/dashboards
+      notify: Restart Grafana
+
+    - name: Create dashboard directory
+      ansible.builtin.file:
+        path: /etc/grafana/dashboards
+        state: directory
+        owner: root
+        group: grafana
+        mode: '0750'
+
+    - name: Add Patroni dashboard
+      ansible.builtin.copy:
+        src: patroni-dashboard.json
+        dest: /etc/grafana/dashboards/patroni-dashboard.json
+        owner: root
+        group: grafana
+        mode: '0640'
+
+    - name: Apply configuration changes now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start Grafana
+      ansible.builtin.systemd_service:
+        name: grafana-server
+        state: started
+        enabled: true
+
+    - name: Wait for Grafana
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}:3000/api/health"
+      register: grafana_health
+      until: grafana_health.status == 200
+      retries: 30
+      delay: 5
+
+  handlers:
+    - name: Restart Prometheus
+      ansible.builtin.systemd_service:
+        name: prometheus
+        state: restarted
+
+    - name: Restart Grafana
+      ansible.builtin.systemd_service:
+        name: grafana-server
+        state: restarted
+
+- name: Give Patroni callbacks the Grafana token
+  hosts: database
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Remind about the Grafana token
+      ansible.builtin.debug:
+        msg: "Create a Grafana service account token, save it to credentials/grafana-token and run just monitoring again"
+      when: grafana_token | length == 0
+      run_once: true
+
+    - name: Copy the Grafana token
+      ansible.builtin.copy:
+        dest: /etc/patroni/grafana-token
+        content: "{{ grafana_token }}\n"
+        owner: postgres
+        group: postgres
+        mode: '0600'
+      when: grafana_token | length > 0
+      no_log: true
