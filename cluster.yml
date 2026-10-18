@@ -50,9 +50,9 @@
         path: /var/lib/etcd/default/member
       register: etcd_data
 
-    - name: Check the lab marker
+    - name: Check the lab etcd marker
       ansible.builtin.stat:
-        path: /etc/dba-sre-lesson5
+        path: /etc/dba-sre-lesson5-etcd
       register: lab_marker
 
     - name: Refuse nodes that already run other clusters
@@ -63,11 +63,12 @@
         fail_msg: "This node already has PostgreSQL 17/main or etcd data from another setup"
 
   tasks:
-    - name: Mark the node as a lesson 5 lab node
+    - name: Mark etcd as created by this lab
       ansible.builtin.copy:
-        dest: /etc/dba-sre-lesson5
-        content: "Managed by dba-sre patroni-lab\n"
+        dest: /etc/dba-sre-lesson5-etcd
+        content: "etcd managed by dba-sre patroni-lab\n"
         mode: '0644'
+      when: etcd_install
 
     - name: Create PostgreSQL cluster defaults directory
       ansible.builtin.file:

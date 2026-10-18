@@ -40,7 +40,7 @@ just events
 | `events` | Показать события смены роли и аннотации Grafana |
 | `stop`, `start` | Остановить или запустить кластер и мониторинг |
 
-При sudo без пароля: `just --set sudo_flags '' apply`.
+При sudo без пароля: `export SUDO_FLAGS=` один раз в сессии или `SUDO_FLAGS= just apply`.
 
 ## Файлы
 

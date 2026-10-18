@@ -1,4 +1,4 @@
-sudo_flags := "-K"
+sudo_flags := env_var_or_default("SUDO_FLAGS", "-K")
 
 default:
     @just --list
