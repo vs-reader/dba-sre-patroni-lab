@@ -25,6 +25,13 @@ grafana_version: "13.2.4"
 grafana_deb_url: "https://github.com/grafana/grafana/releases/download/v13.2.4/grafana_13.2.4_38252365904_linux_amd64.deb"
 grafana_deb_sha256: "f32ba4e166e35a376f39cbeb8dd47c57f7bf608b09339cb41adf6d39082af3c5"
 
+loki_version: "3.7.9"
+loki_deb_url: "https://github.com/grafana/loki/releases/download/v3.7.9/loki_3.7.9_amd64.deb"
+loki_deb_sha256: "9647b50011ea4eb6d44b82bf708b3eb4fa5d837b33a52741cdda5f912f6cd45d"
+vector_version: "0.60.0-1"
+vector_deb_url: "https://github.com/vectordotdev/vector/releases/download/v0.60.0/vector_0.60.0-1_amd64.deb"
+vector_deb_sha256: "985f74a8e07ac8efabc891324435451823e77da5b98b636bd7594f402db41219"
+
 postgresql_parameters:
   log_min_duration_statement: -1
 
@@ -32,3 +39,4 @@ grafana_url: "http://{{ hostvars[groups['monitoring'][0]].ansible_host }}:3000"
 grafana_http_addr: "{{ hostvars[groups['monitoring'][0]].ansible_host }}"
 grafana_token: "{{ lookup('ansible.builtin.file', 'credentials/grafana-token', errors='ignore') | default('', true) }}"
 git_commit: "{{ lookup('ansible.builtin.pipe', 'git describe --always --dirty 2>/dev/null || echo none') }}"
+loki_url: "http://{{ hostvars[groups['monitoring'][0]].ansible_host }}:3100"

@@ -1,0 +1,135 @@
+---
+- name: Install Loki on the monitoring node
+  hosts: monitoring
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Pin Loki version in APT
+      ansible.builtin.template:
+        src: apt-pin.pref.j2
+        dest: /etc/apt/preferences.d/dba-sre-loki.pref
+        mode: '0644'
+      vars:
+        item:
+          name: loki
+          version: "{{ loki_version }}"
+
+    - name: Download Loki package
+      ansible.builtin.get_url:
+        url: "{{ loki_deb_url }}"
+        dest: /var/cache/apt/archives/loki.deb
+        checksum: "sha256:{{ loki_deb_sha256 }}"
+        mode: '0644'
+
+    - name: Install Loki
+      ansible.builtin.apt:
+        deb: /var/cache/apt/archives/loki.deb
+        policy_rc_d: 101
+
+    - name: Create Loki data directory
+      ansible.builtin.file:
+        path: /var/lib/loki
+        state: directory
+        owner: loki
+        group: nogroup
+        mode: '0750'
+
+    - name: Configure Loki
+      ansible.builtin.template:
+        src: loki.yml.j2
+        dest: /etc/loki/config.yml
+        mode: '0644'
+      notify: Restart Loki
+
+    - name: Add Loki data source to Grafana
+      ansible.builtin.copy:
+        dest: /etc/grafana/provisioning/datasources/loki.yml
+        owner: root
+        group: grafana
+        mode: '0640'
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Loki
+              uid: loki
+              type: loki
+              url: {{ loki_url }}
+      notify: Restart Grafana
+
+    - name: Apply configuration changes now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start Loki
+      ansible.builtin.systemd_service:
+        name: loki
+        state: started
+        enabled: true
+
+    - name: Wait for Loki
+      ansible.builtin.uri:
+        url: "{{ loki_url }}/ready"
+      register: loki_ready
+      until: loki_ready.status == 200
+      retries: 30
+      delay: 2
+
+  handlers:
+    - name: Restart Loki
+      ansible.builtin.systemd_service:
+        name: loki
+        state: restarted
+
+    - name: Restart Grafana
+      ansible.builtin.systemd_service:
+        name: grafana-server
+        state: restarted
+
+- name: Ship Patroni and PostgreSQL logs with Vector
+  hosts: database
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Pin Vector version in APT
+      ansible.builtin.template:
+        src: apt-pin.pref.j2
+        dest: /etc/apt/preferences.d/dba-sre-vector.pref
+        mode: '0644'
+      vars:
+        item:
+          name: vector
+          version: "{{ vector_version }}"
+
+    - name: Download Vector package
+      ansible.builtin.get_url:
+        url: "{{ vector_deb_url }}"
+        dest: /var/cache/apt/archives/vector.deb
+        checksum: "sha256:{{ vector_deb_sha256 }}"
+        mode: '0644'
+
+    - name: Install Vector
+      ansible.builtin.apt:
+        deb: /var/cache/apt/archives/vector.deb
+
+    - name: Configure Vector
+      ansible.builtin.template:
+        src: vector.yaml.j2
+        dest: /etc/vector/vector.yaml
+        mode: '0644'
+        validate: vector validate --no-environment %s
+      notify: Restart Vector
+
+    - name: Start Vector
+      ansible.builtin.systemd_service:
+        name: vector
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Restart Vector
+      ansible.builtin.systemd_service:
+        name: vector
+        state: restarted

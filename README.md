@@ -36,6 +36,7 @@ just events
 | `plan` | Показать план изменений (после первого `apply`) |
 | `verify` | Проверить etcd, роли, запись и репликацию |
 | `monitoring` | Установить Prometheus и Grafana, передать токен узлам |
+| `logging` | Установить Loki и Vector, логи Patroni и PostgreSQL в Grafana |
 | `switchover db02` | Плановое переключение на указанную реплику |
 | `events` | Показать события смены роли и аннотации Grafana |
 | `stop`, `start` | Остановить или запустить кластер и мониторинг |
@@ -51,6 +52,7 @@ just events
 - `monitoring.yml`: Prometheus и Grafana на одной ВМ, отдельно от кластера.
 - `verify.yml`, `switchover.yml`, `events.yml`: проверка, переключение, показ события.
 - `power.yml`: остановка и запуск служб без удаления данных.
+- `logging.yml`, `templates/vector.yaml.j2`, `templates/loki.yml.j2`: сбор логов, см. [docs/logging.md](docs/logging.md).
 
 Пароли создаются при первом запуске в `credentials/` и не попадают в Git.
 Grafana: пользователь `admin`, пароль в `credentials/grafana-admin`.

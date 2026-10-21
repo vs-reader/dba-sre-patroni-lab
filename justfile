@@ -4,7 +4,7 @@ default:
     @just --list
 
 check:
-    ansible-playbook --syntax-check cluster.yml monitoring.yml verify.yml switchover.yml events.yml power.yml
+    ansible-playbook --syntax-check cluster.yml monitoring.yml verify.yml switchover.yml events.yml power.yml logging.yml
 
 ping:
     ansible all -i inventory.local.ini -m ansible.builtin.ping
@@ -17,6 +17,9 @@ apply:
 
 monitoring:
     ansible-playbook -i inventory.local.ini monitoring.yml {{sudo_flags}}
+
+logging:
+    ansible-playbook -i inventory.local.ini logging.yml {{sudo_flags}}
 
 verify:
     ansible-playbook -i inventory.local.ini verify.yml {{sudo_flags}}
