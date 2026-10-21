@@ -1,41 +1,64 @@
+# Loki в одном процессе (monolithic): все компоненты в одной службе,
+# данные на локальном диске. Подходит для учебного стенда.
+
+# Без авторизации и без разделения по арендаторам (tenant).
 auth_enabled: false
 
 server:
+  # HTTP: сюда пишет Vector и отсюда читает Grafana.
   http_listen_address: {{ ansible_host }}
   http_listen_port: 3100
+  # gRPC нужен компонентам Loki между собой, наружу не открываем.
   grpc_listen_address: 127.0.0.1
   grpc_listen_port: 9096
+  # Журнал самого Loki: только предупреждения и ошибки.
   log_level: warn
 
+# Общие настройки для всех компонентов.
 common:
+  # Адрес, под которым экземпляр регистрируется в кольце.
   instance_addr: 127.0.0.1
+  # Каталог для служебных данных компонентов.
   path_prefix: /var/lib/loki
+  # Где хранить блоки строк (chunks) и правила оповещений.
   storage:
     filesystem:
       chunks_directory: /var/lib/loki/chunks
       rules_directory: /var/lib/loki/rules
+  # Каждый поток хранится в одной копии: экземпляр один.
   replication_factor: 1
+  # Кольцо распределяет потоки между ingester'ами. Состояние кольца
+  # в памяти процесса: годится только для одного экземпляра.
+  # Для нескольких — memberlist, consul или etcd.
   ring:
     kvstore:
       store: inmemory
 
+# Формат индекса и хранения. Новую схему добавляют новой записью
+# с более поздней датой from, старые записи не меняют.
 schema_config:
   configs:
     - from: 2024-01-01
+      # Индекс TSDB, блоки в файловой системе, схема v13 (актуальная).
       store: tsdb
       object_store: filesystem
       schema: v13
+      # Новый файл индекса каждые 24 часа.
       index:
         prefix: index_
         period: 24h
 
 limits_config:
+  # Сколько хранить логи. Удаляет compactor.
   retention_period: 48h
 
+# Compactor сжимает индекс и удаляет данные старше retention_period.
 compactor:
   working_directory: /var/lib/loki/compactor
   retention_enabled: true
+  # Где хранить запросы на удаление строк через API.
   delete_request_store: filesystem
 
+# Не отправлять анонимную статистику в Grafana Labs.
 analytics:
   reporting_enabled: false

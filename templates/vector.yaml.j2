@@ -1,24 +1,38 @@
-# Logs to Loki: Patroni journal on every node, Grafana log file on the monitoring node.
+# Vector: журнал Patroni на каждом узле и файл Grafana на ВМ monitoring
+# отправляются в Loki. Цепочка: sources -> transforms -> sinks,
+# каждый блок указывает в inputs, откуда берёт строки.
+# Разбор с примерами — docs/vector.md.
+
+# Источники: откуда читать.
 sources:
+  # Журнал systemd только службы patroni.service: Patroni,
+  # PostgreSQL под ним и обработчик role-event.
   patroni:
     type: journald
     include_units:
       - patroni.service
 {% if inventory_hostname in groups['monitoring'] %}
 
+  # Файл журнала Grafana. Vector дочитывает новые строки и помнит
+  # позицию между перезапусками. Нужен доступ: vector в группе grafana.
   grafana:
     type: file
     include:
       - /var/log/grafana/grafana.log
 {% endif %}
 
+# Преобразования: что сделать со строкой.
 transforms:
+  # Отбросить служебные строки «no action. I am...», которые Patroni
+  # пишет каждые 10 секунд. Проходят строки, где условие истинно.
   drop_noise:
     type: filter
     inputs:
       - patroni
     condition: '!contains(string!(.message), "no action. I am")'
 
+  # Программа на языке VRL: добавить поле env и приписать его
+  # в начало текста. .message — текст строки.
   add_info:
     type: remap
     inputs:
@@ -27,21 +41,28 @@ transforms:
       .env = "lab"
       .message = "[" + .env + "] " + string!(.message)
 
+# Получатели: куда отправить.
 sinks:
   loki_patroni:
     type: loki
+    # Берём строки после фильтра и remap.
     inputs:
       - add_info
     endpoint: {{ loki_url }}
+    # В Loki уходит только текст строки, без остальных полей.
     encoding:
       codec: text
+    # Метки потока в Loki: по ним ищут, например {app="patroni"}.
+    # Только значения с малым числом вариантов.
     labels:
       cluster: {{ cluster_name }}
       node: {{ inventory_hostname }}
       app: patroni
+      # Значение метки из поля env, которое добавил add_info.
       env: "{{ '{{' }} env {{ '}}' }}"
 {% if inventory_hostname in groups['monitoring'] %}
 
+  # Файл Grafana отправляем без преобразований.
   loki_grafana:
     type: loki
     inputs:
