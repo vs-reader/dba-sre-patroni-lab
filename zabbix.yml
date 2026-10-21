@@ -1,0 +1,283 @@
+---
+- name: Install Zabbix server and web interface
+  hosts: zabbix
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  vars:
+    zabbix_db_password: "{{ lookup('ansible.builtin.password', 'credentials/zabbix-db chars=ascii_letters,digits length=24') }}"
+  tasks:
+    - name: Require the Zabbix node to be a database node
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in groups['database']
+        fail_msg: "The zabbix group must contain one of the database nodes: it uses PostgreSQL 17 installed by cluster.yml"
+
+    - name: Pin package versions in APT
+      ansible.builtin.template:
+        src: apt-pin.pref.j2
+        dest: "/etc/apt/preferences.d/dba-sre-{{ item.name }}.pref"
+        mode: '0644'
+      loop:
+        - name: zabbix-server-pgsql
+          version: "{{ zabbix_version }}"
+        - name: zabbix-frontend-php
+          version: "{{ zabbix_version }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Install Zabbix server, web interface and Apache
+      ansible.builtin.apt:
+        name:
+          - "zabbix-server-pgsql={{ zabbix_version }}"
+          - "zabbix-frontend-php={{ zabbix_version }}"
+          - php-pgsql
+          - apache2
+          - libapache2-mod-php
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        policy_rc_d: 101
+
+    - name: Enable the en_US.UTF-8 locale for the web interface
+      ansible.builtin.lineinfile:
+        path: /etc/locale.gen
+        regexp: '^#? *en_US.UTF-8 UTF-8'
+        line: en_US.UTF-8 UTF-8
+      register: locale_gen
+
+    - name: Generate locales
+      ansible.builtin.command: locale-gen
+      when: locale_gen is changed
+
+    - name: Create a separate PostgreSQL instance for Zabbix
+      ansible.builtin.command: "pg_createcluster 17 {{ zabbix_db_cluster }} --port {{ zabbix_db_port }}"
+      args:
+        creates: "/etc/postgresql/17/{{ zabbix_db_cluster }}"
+
+    - name: Start the Zabbix PostgreSQL instance
+      ansible.builtin.systemd_service:
+        name: "postgresql@17-{{ zabbix_db_cluster }}"
+        state: started
+        enabled: true
+
+    - name: Create the zabbix role
+      ansible.builtin.command:
+        argv: [psql, "-p{{ zabbix_db_port }}", -XAtq, -v, ON_ERROR_STOP=1]
+        stdin: >-
+          DO $$BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'zabbix') THEN CREATE ROLE zabbix LOGIN; END IF;
+          END$$;
+          ALTER ROLE zabbix PASSWORD '{{ zabbix_db_password }}';
+      become_user: postgres
+      changed_when: false
+      no_log: true
+
+    - name: Check the zabbix database
+      ansible.builtin.command: "psql -p{{ zabbix_db_port }} -XAtqc \"SELECT 1 FROM pg_database WHERE datname = 'zabbix'\""
+      become_user: postgres
+      register: zabbix_db
+      changed_when: false
+
+    - name: Create the zabbix database
+      ansible.builtin.command: "createdb -p{{ zabbix_db_port }} -O zabbix zabbix"
+      become_user: postgres
+      when: zabbix_db.stdout != '1'
+
+    - name: Check the Zabbix schema
+      ansible.builtin.command: "psql -p{{ zabbix_db_port }} -d zabbix -XAtqc \"SELECT to_regclass('public.dbversion') IS NOT NULL\""
+      become_user: postgres
+      register: zabbix_schema
+      changed_when: false
+
+    - name: Import the Zabbix schema
+      ansible.builtin.shell: |
+        set -o pipefail
+        for f in schema images data; do
+          zcat /usr/share/zabbix-server-pgsql/$f.sql.gz | psql -XAtq -h 127.0.0.1 -p {{ zabbix_db_port }} -U zabbix zabbix >/dev/null
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        PGPASSWORD: "{{ zabbix_db_password }}"
+      when: zabbix_schema.stdout != 't'
+      no_log: true
+
+    - name: Connect Zabbix server to its database through the socket
+      ansible.builtin.copy:
+        dest: /etc/zabbix/zabbix_server.conf.d/database.conf
+        mode: '0644'
+        content: |
+          DBHost=
+          DBPort={{ zabbix_db_port }}
+      notify: Restart Zabbix server
+
+    - name: Connect the web interface to the database
+      ansible.builtin.template:
+        src: zabbix.conf.php.j2
+        dest: /etc/zabbix/zabbix.conf.php
+        owner: root
+        group: www-data
+        mode: '0640'
+      diff: false
+      notify: Restart Apache
+
+    - name: Set PHP limits for Zabbix
+      ansible.builtin.copy:
+        dest: /etc/php/8.4/apache2/conf.d/99-zabbix.ini
+        mode: '0644'
+        content: |
+          post_max_size = 16M
+          max_execution_time = 300
+          max_input_time = 300
+          date.timezone = Europe/Moscow
+      notify: Restart Apache
+
+    - name: Enable the Zabbix web interface in Apache
+      ansible.builtin.command: a2enconf zabbix-frontend-php
+      args:
+        creates: /etc/apache2/conf-enabled/zabbix-frontend-php.conf
+      notify: Restart Apache
+
+    - name: Apply configuration changes now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start Zabbix server and Apache
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - zabbix-server
+        - apache2
+
+    - name: Wait for the Zabbix API
+      ansible.builtin.uri:
+        url: "http://{{ zabbix_ip }}/zabbix/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        body: {"jsonrpc": "2.0", "method": "apiinfo.version", "params": {}, "id": 1}
+      register: zabbix_api
+      until: zabbix_api.json.result is defined
+      retries: 30
+      delay: 2
+
+  handlers:
+    - name: Restart Zabbix server
+      ansible.builtin.systemd_service:
+        name: zabbix-server
+        state: restarted
+
+    - name: Restart Apache
+      ansible.builtin.systemd_service:
+        name: apache2
+        state: restarted
+
+- name: Install Zabbix agent 2 on the database nodes
+  hosts: database
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Pin Zabbix agent version in APT
+      ansible.builtin.template:
+        src: apt-pin.pref.j2
+        dest: /etc/apt/preferences.d/dba-sre-zabbix-agent2.pref
+        mode: '0644'
+      vars:
+        item:
+          name: zabbix-agent2
+          version: "{{ zabbix_version }}"
+
+    - name: Install Zabbix agent 2
+      ansible.builtin.apt:
+        name: "zabbix-agent2={{ zabbix_version }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Point the agent to the Zabbix server
+      ansible.builtin.copy:
+        dest: /etc/zabbix/zabbix_agent2.d/server.conf
+        mode: '0644'
+        content: |
+          Server=127.0.0.1,{{ zabbix_ip }}
+          ServerActive={{ zabbix_ip }}
+          Hostname={{ zabbix_host_name | default(inventory_hostname) }}
+      notify: Restart Zabbix agent 2
+
+    - name: Start Zabbix agent 2
+      ansible.builtin.systemd_service:
+        name: zabbix-agent2
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Restart Zabbix agent 2
+      ansible.builtin.systemd_service:
+        name: zabbix-agent2
+        state: restarted
+
+- name: Check writes to the cluster from the Zabbix node
+  hosts: zabbix
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  vars:
+    monitor_password: "{{ lookup('ansible.builtin.password', 'credentials/zbx-monitor chars=ascii_letters,digits length=24') }}"
+    cluster_hosts: "{{ groups['database'] | map('extract', hostvars, 'ansible_host') | join(',') }}"
+  tasks:
+    - name: Create the monitoring role on the leader
+      ansible.builtin.command:
+        argv:
+          - psql
+          - "host={{ cluster_hosts }} port={{ pg_port }} dbname=postgres user=postgres target_session_attrs=read-write"
+          - -XAtq
+          - -v
+          - ON_ERROR_STOP=1
+        stdin: >-
+          DO $$BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'zbx_monitor') THEN CREATE ROLE zbx_monitor LOGIN IN ROLE pg_monitor; END IF;
+          END$$;
+          ALTER ROLE zbx_monitor PASSWORD '{{ monitor_password }}';
+      environment:
+        PGPASSWORD: "{{ lookup('ansible.builtin.password', 'credentials/postgres chars=ascii_letters,digits length=24') }}"
+      changed_when: false
+      no_log: true
+
+    - name: Save the monitoring password for the agent
+      ansible.builtin.copy:
+        dest: /etc/zabbix/zabbix.pgpass
+        content: "*:*:*:zbx_monitor:{{ monitor_password }}\n"
+        owner: zabbix
+        group: zabbix
+        mode: '0600'
+      diff: false
+      no_log: true
+
+    - name: Add the write availability check
+      ansible.builtin.copy:
+        dest: /etc/zabbix/zabbix_agent2.d/postgresql.conf
+        mode: '0644'
+        content: |
+          UserParameter=pgsql.write_available,PGPASSFILE=/etc/zabbix/zabbix.pgpass psql "host={{ cluster_hosts }} port={{ pg_port }} dbname=postgres user=zbx_monitor target_session_attrs=read-write connect_timeout=3" -XAtqc "select 1" 2>/dev/null || echo 0
+      notify: Restart Zabbix agent 2
+
+    - name: Apply the agent configuration now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Check writes through the agent
+      ansible.builtin.command: zabbix_agent2 -t pgsql.write_available
+      become_user: zabbix
+      register: write_check
+      changed_when: false
+      failed_when: "'[s|1]' not in write_check.stdout"
+
+  handlers:
+    - name: Restart Zabbix agent 2
+      ansible.builtin.systemd_service:
+        name: zabbix-agent2
+        state: restarted

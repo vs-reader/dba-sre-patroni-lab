@@ -1,0 +1,209 @@
+---
+- name: Set the Zabbix Admin password
+  hosts: zabbix
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  vars:
+    zabbix_api: "http://{{ zabbix_ip }}/zabbix/api_jsonrpc.php"
+    admin_password: "{{ lookup('ansible.builtin.password', 'credentials/zabbix-admin chars=ascii_letters,digits length=20') }}"
+  tasks:
+    - name: Log in with the lab password
+      ansible.builtin.uri:
+        url: "{{ zabbix_api }}"
+        method: POST
+        body_format: json
+        body: {"jsonrpc": "2.0", "method": "user.login", "params": {"username": "Admin", "password": "{{ admin_password }}"}, "id": 1}
+      register: lab_login
+      no_log: true
+
+    - name: Log in with the default password
+      ansible.builtin.uri:
+        url: "{{ zabbix_api }}"
+        method: POST
+        body_format: json
+        body: {"jsonrpc": "2.0", "method": "user.login", "params": {"username": "Admin", "password": "zabbix"}, "id": 1}
+      register: default_login
+      when: lab_login.json.result is not defined
+      failed_when: default_login.json.result is not defined
+      no_log: true
+
+    - name: Replace the default password
+      ansible.builtin.uri:
+        url: "{{ zabbix_api }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ default_login.json.result }}"
+        body: {"jsonrpc": "2.0", "method": "user.update", "params": {"userid": "1", "current_passwd": "zabbix", "passwd": "{{ admin_password }}"}, "id": 1}
+      register: password_update
+      when: lab_login.json.result is not defined
+      failed_when: password_update.json.result is not defined
+      changed_when: true
+      no_log: true
+
+- name: Describe the lab in Zabbix
+  hosts: zabbix
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  vars:
+    ansible_connection: httpapi
+    ansible_network_os: community.zabbix.zabbix
+    ansible_host: "{{ zabbix_ip }}"
+    ansible_httpapi_port: 80
+    ansible_zabbix_url_path: zabbix
+    ansible_user: Admin
+    ansible_httpapi_pass: "{{ lookup('ansible.builtin.password', 'credentials/zabbix-admin chars=ascii_letters,digits length=20') }}"
+    service_host: "{{ hostvars[groups['zabbix'][0]].zabbix_host_name | default(groups['zabbix'][0]) }}"
+  tasks:
+    - name: Create the host group
+      community.zabbix.zabbix_group:
+        host_groups:
+          - DBA SRE lab
+
+    - name: Create the port check template
+      community.zabbix.zabbix_template:
+        template_name: PostgreSQL port lab
+        template_groups:
+          - Templates
+
+    - name: Check the PostgreSQL port on each node
+      community.zabbix.zabbix_item:
+        name: "PostgreSQL port {{ pg_port }}"
+        template_name: PostgreSQL port lab
+        params:
+          type: zabbix_agent
+          key: "net.tcp.service[tcp,{HOST.IP},{{ pg_port }}]"
+          value_type: numeric_unsigned
+          interval: 10s
+
+    - name: Raise a problem when the port is closed
+      community.zabbix.zabbix_trigger:
+        name: "PostgreSQL port is down on {HOST.NAME}"
+        template_name: PostgreSQL port lab
+        params:
+          severity: high
+          expression: "last(/PostgreSQL port lab/net.tcp.service[tcp,{HOST.IP},{{ pg_port }}])=0"
+          tags:
+            - tag: service
+              value: postgresql-node
+
+    - name: Add the database nodes
+      community.zabbix.zabbix_host:
+        host_name: "{{ hostvars[item].zabbix_host_name | default(item) }}"
+        host_groups:
+          - DBA SRE lab
+        link_templates:
+          - PostgreSQL port lab
+        interfaces:
+          - type: agent
+            main: 1
+            useip: 1
+            ip: "{{ hostvars[item].ansible_host }}"
+            dns: ""
+            port: "10050"
+        tags:
+          - tag: cluster
+            value: "{{ cluster_name }}"
+      loop: "{{ groups['database'] }}"
+
+    - name: Check writes to the cluster
+      community.zabbix.zabbix_item:
+        name: PostgreSQL write available (service)
+        host_name: "{{ service_host }}"
+        params:
+          type: zabbix_agent
+          key: pgsql.write_available
+          value_type: numeric_unsigned
+          interval: 10s
+          interface:
+            main: true
+
+    - name: Calculate the write availability SLI
+      community.zabbix.zabbix_item:
+        name: SLI write availability 1h
+        host_name: "{{ service_host }}"
+        params:
+          type: calculated
+          key: sli.write_availability
+          value_type: numeric_float
+          interval: 1m
+          units: "%"
+          params: "avg(//pgsql.write_available,1h)*100"
+
+    - name: Raise a problem when the cluster does not accept writes
+      community.zabbix.zabbix_trigger:
+        name: PostgreSQL cluster does not accept writes
+        host_name: "{{ service_host }}"
+        params:
+          severity: disaster
+          expression: "max(/{{ service_host }}/pgsql.write_available,30s)=0"
+          tags:
+            - tag: service
+              value: postgresql-demo
+
+    - name: Create the service for the SLA
+      community.zabbix.zabbix_service:
+        name: PostgreSQL demo cluster
+        algorithm: most_crit_of_child_serv
+        sortorder: 0
+        weight: 0
+        problem_tags:
+          - tag: service
+            value: postgresql-demo
+
+- name: Create the SLA
+  hosts: zabbix
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  vars:
+    zabbix_api: "http://{{ zabbix_ip }}/zabbix/api_jsonrpc.php"
+    admin_password: "{{ lookup('ansible.builtin.password', 'credentials/zabbix-admin chars=ascii_letters,digits length=20') }}"
+  tasks:
+    - name: Log in
+      ansible.builtin.uri:
+        url: "{{ zabbix_api }}"
+        method: POST
+        body_format: json
+        body: {"jsonrpc": "2.0", "method": "user.login", "params": {"username": "Admin", "password": "{{ admin_password }}"}, "id": 1}
+      register: login
+      failed_when: login.json.result is not defined
+      no_log: true
+
+    - name: Find the SLA
+      ansible.builtin.uri:
+        url: "{{ zabbix_api }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ login.json.result }}"
+        body: {"jsonrpc": "2.0", "method": "sla.get", "params": {"filter": {"name": "PostgreSQL 99.9"}}, "id": 1}
+      register: sla
+
+    - name: Create the SLA
+      ansible.builtin.uri:
+        url: "{{ zabbix_api }}"
+        method: POST
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ login.json.result }}"
+        body:
+          jsonrpc: "2.0"
+          method: sla.create
+          id: 1
+          params:
+            name: PostgreSQL 99.9
+            slo: "99.9"
+            period: 1
+            timezone: system
+            effective_date: "{{ (now().timestamp() // 86400 * 86400) | int }}"
+            service_tags:
+              - tag: name
+                operator: 0
+                value: PostgreSQL demo cluster
+      register: sla_create
+      when: sla.json.result | length == 0
+      failed_when: sla_create.json.result is not defined
+      changed_when: true

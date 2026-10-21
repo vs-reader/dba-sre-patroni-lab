@@ -32,6 +32,10 @@ vector_version: "0.60.0-1"
 vector_deb_url: "https://github.com/vectordotdev/vector/releases/download/v0.60.0/vector_0.60.0-1_amd64.deb"
 vector_deb_sha256: "985f74a8e07ac8efabc891324435451823e77da5b98b636bd7594f402db41219"
 
+zabbix_version: "1:7.0.22+dfsg-1~deb13u1"
+zabbix_db_cluster: zabbix
+zabbix_db_port: 5433
+
 postgresql_parameters:
   log_min_duration_statement: -1
 
@@ -40,3 +44,4 @@ grafana_http_addr: "{{ hostvars[groups['monitoring'][0]].ansible_host }}"
 grafana_token: "{{ lookup('ansible.builtin.file', 'credentials/grafana-token', errors='ignore') | default('', true) }}"
 git_commit: "{{ lookup('ansible.builtin.pipe', 'git describe --always --dirty 2>/dev/null || echo none') }}"
 loki_url: "http://{{ hostvars[groups['monitoring'][0]].ansible_host }}:3100"
+zabbix_ip: "{{ hostvars[groups['zabbix'][0]].ansible_host }}"

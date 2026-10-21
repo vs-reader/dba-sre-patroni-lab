@@ -37,6 +37,9 @@ just events
 | `verify` | Проверить etcd, роли, запись и репликацию |
 | `monitoring` | Установить Prometheus и Grafana, передать токен узлам |
 | `logging` | Установить Loki и Vector, логи Patroni и PostgreSQL в Grafana |
+| `zabbix` | Установить Zabbix server, агенты и проверку записи в кластер |
+| `collections` | Установить коллекцию community.zabbix (один раз) |
+| `zabbix-config` | Создать в Zabbix группу, шаблон, хосты, триггеры, сервис и SLA |
 | `switchover db02` | Плановое переключение на указанную реплику |
 | `events` | Показать события смены роли и аннотации Grafana |
 | `stop`, `start` | Остановить или запустить кластер и мониторинг |
@@ -53,6 +56,7 @@ just events
 - `verify.yml`, `switchover.yml`, `events.yml`: проверка, переключение, показ события.
 - `power.yml`: остановка и запуск служб без удаления данных.
 - `logging.yml`, `templates/vector.yaml.j2`, `templates/loki.yml.j2`: сбор логов, см. [docs/logging.md](docs/logging.md).
+- `zabbix.yml`, `zabbix-config.yml`, `requirements.yml`: Zabbix и SLI доступности записи, см. [docs/zabbix.md](docs/zabbix.md).
 
 Пароли создаются при первом запуске в `credentials/` и не попадают в Git.
 Grafana: пользователь `admin`, пароль в `credentials/grafana-admin`.

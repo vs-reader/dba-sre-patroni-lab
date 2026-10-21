@@ -4,7 +4,7 @@ default:
     @just --list
 
 check:
-    ansible-playbook --syntax-check cluster.yml monitoring.yml verify.yml switchover.yml events.yml power.yml logging.yml
+    ansible-playbook --syntax-check cluster.yml monitoring.yml verify.yml switchover.yml events.yml power.yml logging.yml zabbix.yml zabbix-config.yml
 
 ping:
     ansible all -i inventory.local.ini -m ansible.builtin.ping
@@ -20,6 +20,15 @@ monitoring:
 
 logging:
     ansible-playbook -i inventory.local.ini logging.yml {{sudo_flags}}
+
+zabbix:
+    ansible-playbook -i inventory.local.ini zabbix.yml {{sudo_flags}}
+
+collections:
+    ansible-galaxy collection install -r requirements.yml
+
+zabbix-config:
+    ansible-playbook -i inventory.local.ini zabbix-config.yml
 
 verify:
     ansible-playbook -i inventory.local.ini verify.yml {{sudo_flags}}

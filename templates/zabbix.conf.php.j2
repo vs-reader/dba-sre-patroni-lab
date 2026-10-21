@@ -1,0 +1,10 @@
+<?php
+$DB['TYPE']     = 'POSTGRESQL';
+$DB['SERVER']   = '127.0.0.1';
+$DB['PORT']     = '{{ zabbix_db_port }}';
+$DB['DATABASE'] = 'zabbix';
+$DB['USER']     = 'zabbix';
+$DB['PASSWORD'] = '{{ lookup('ansible.builtin.password', 'credentials/zabbix-db chars=ascii_letters,digits length=24') }}';
+$DB['SCHEMA']   = '';
+$ZBX_SERVER_NAME = 'DBA SRE';
+$IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
