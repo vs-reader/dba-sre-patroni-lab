@@ -1,0 +1,5 @@
+---
+cluster_name: demo
+pg_port: 5432
+patroni_api_port: 8008
+etcd_install: true

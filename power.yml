@@ -1,6 +1,6 @@
 ---
 - name: Start or stop the cluster
-  hosts: database
+  hosts: "{{ cluster | default('database1') }}"
   become: true
   gather_facts: false
   vars_files:
@@ -27,3 +27,4 @@
       loop:
         - prometheus
         - grafana-server
+      when: cluster is not defined

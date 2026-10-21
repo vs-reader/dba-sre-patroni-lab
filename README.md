@@ -13,7 +13,8 @@ cp -n inventory.ini inventory.local.ini
 nano inventory.local.ini
 ```
 
-В `inventory.local.ini` укажите внутренние адреса трёх ВМ. `monitoring` — ВМ для Prometheus и Grafana.
+В `inventory.local.ini` укажите внутренние адреса трёх ВМ группы `database1`. `monitoring` — ВМ для Prometheus и Grafana, `zabbix` — для Zabbix.
+Настройки кластера (имя, порты, установка etcd) — в `group_vars/database1.yml`.
 Узлы должны быть без PostgreSQL 17/main и без etcd: `cluster.yml` откажется работать на занятых узлах.
 
 ## Запуск
@@ -46,9 +47,38 @@ just events
 
 При sudo без пароля: `export SUDO_FLAGS=` один раз в сессии или `SUDO_FLAGS= just apply`.
 
+## Несколько кластеров
+
+Каждый кластер — своя группа inventory из трёх узлов (`database1`, `database2`, ...) в общей группе `database`,
+настройки — в `group_vars/<группа>.yml` с уникальным `cluster_name`. Имена узлов в inventory должны быть уникальными.
+
+```ini
+[database2]
+d2-db01 ansible_host=IP_4
+d2-db02 ansible_host=IP_5
+d2-db03 ansible_host=IP_6
+
+[database:children]
+database1
+database2
+```
+
+Команды кластера принимают имя группы, без него — `database1`:
+
+```bash
+just apply database2
+just verify database2
+just switchover d2-db02 database2
+just stop database2
+```
+
+Мониторинг, логи и Zabbix общие: `just monitoring`, `just logging`, `just zabbix`, `just zabbix-config` подключают все кластеры группы `database`.
+На дашборде Patroni HA кластер выбирается переменной Cluster.
+
 ## Файлы
 
-- `vars.yml`: имя кластера, точные версии пакетов, параметры PostgreSQL.
+- `vars.yml`: точные версии пакетов, параметры PostgreSQL.
+- `group_vars/database1.yml`: имя кластера, порты, установка etcd.
 - `cluster.yml`: отметка прогона в Grafana, пины APT, etcd, Patroni и обработчик `on_role_change`.
 - `templates/patroni.yml.j2`: конфигурация Patroni.
 - `templates/role-event.j2`: обработчик: журнал `patroni-role`, затем аннотация Grafana.

@@ -9,7 +9,7 @@ restapi:
     password: {{ lookup('ansible.builtin.password', 'credentials/patroni-api chars=ascii_letters,digits length=24') }}
 
 etcd3:
-  hosts: {% for host in groups['database'] %}{{ hostvars[host].ansible_host }}:2379{{ ',' if not loop.last }}{% endfor %}
+  hosts: {% for host in groups[cluster_group] %}{{ hostvars[host].ansible_host }}:2379{{ ',' if not loop.last }}{% endfor %}
 
 
 bootstrap:
@@ -38,8 +38,11 @@ postgresql:
       password: {{ lookup('ansible.builtin.password', 'credentials/replicator chars=ascii_letters,digits length=24') }}
   pg_hba:
     - local all all peer
-{% for host in groups['database'] %}
+{% for host in groups[cluster_group] %}
     - host replication replicator {{ hostvars[host].ansible_host }}/32 scram-sha-256
+    - host all all {{ hostvars[host].ansible_host }}/32 scram-sha-256
+{% endfor %}
+{% for host in groups['zabbix'] | default([]) | difference(groups[cluster_group]) %}
     - host all all {{ hostvars[host].ansible_host }}/32 scram-sha-256
 {% endfor %}
   parameters:

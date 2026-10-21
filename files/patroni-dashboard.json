@@ -3,12 +3,18 @@
   "title": "Patroni HA",
   "schemaVersion": 39,
   "refresh": "5s",
-  "time": { "from": "now-30m", "to": "now" },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
   "annotations": {
     "list": [
       {
         "builtIn": 1,
-        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -16,11 +22,21 @@
         "type": "dashboard"
       },
       {
-        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "iconColor": "orange",
         "name": "Ansible runs",
-        "target": { "type": "tags", "tags": ["ansible"], "matchAny": false, "limit": 100 }
+        "target": {
+          "type": "tags",
+          "tags": [
+            "ansible"
+          ],
+          "matchAny": false,
+          "limit": 100
+        }
       }
     ]
   },
@@ -29,16 +45,31 @@
       "id": 1,
       "type": "timeseries",
       "title": "Leader by node (1 = leader)",
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        { "refId": "A", "expr": "patroni_primary", "legendFormat": "{{name}}" }
+        {
+          "refId": "A",
+          "expr": "patroni_primary{scope=~\"$scope\"}",
+          "legendFormat": "{{scope}} {{name}}"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "min": 0,
           "max": 1,
-          "custom": { "lineInterpolation": "stepAfter", "lineWidth": 2 }
+          "custom": {
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2
+          }
         },
         "overrides": []
       }
@@ -47,19 +78,60 @@
       "id": 2,
       "type": "timeseries",
       "title": "Replica replay lag, bytes",
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
         {
           "refId": "A",
-          "expr": "scalar(max(patroni_xlog_location)) - (patroni_xlog_replayed_location and patroni_replica == 1)",
-          "legendFormat": "{{name}}"
+          "expr": "max by (scope) (patroni_xlog_location{scope=~\"$scope\"}) - on (scope) group_right() (patroni_xlog_replayed_location{scope=~\"$scope\"} and on (scope, name) patroni_replica == 1)",
+          "legendFormat": "{{scope}} {{name}}"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "bytes", "min": 0 },
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
         "overrides": []
       }
     }
-  ]
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "scope",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(patroni_primary, scope)",
+          "refId": "scope"
+        },
+        "definition": "label_values(patroni_primary, scope)",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2
+      }
+    ]
+  }
 }

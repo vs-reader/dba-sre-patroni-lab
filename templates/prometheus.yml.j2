@@ -6,5 +6,5 @@ scrape_configs:
     static_configs:
       - targets:
 {% for host in groups['database'] %}
-          - {{ hostvars[host].ansible_host }}:{{ patroni_api_port }}
+          - {{ hostvars[host].ansible_host }}:{{ hostvars[host].patroni_api_port }}
 {% endfor %}

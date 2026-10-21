@@ -9,11 +9,11 @@ check:
 ping:
     ansible all -i inventory.local.ini -m ansible.builtin.ping
 
-plan:
-    ansible-playbook -i inventory.local.ini cluster.yml --check --diff {{sudo_flags}}
+plan cluster="":
+    ansible-playbook -i inventory.local.ini cluster.yml --check --diff {{ if cluster == "" { "" } else { "-e cluster=" + cluster } }} {{sudo_flags}}
 
-apply:
-    ansible-playbook -i inventory.local.ini cluster.yml {{sudo_flags}}
+apply cluster="":
+    ansible-playbook -i inventory.local.ini cluster.yml {{ if cluster == "" { "" } else { "-e cluster=" + cluster } }} {{sudo_flags}}
 
 monitoring:
     ansible-playbook -i inventory.local.ini monitoring.yml {{sudo_flags}}
@@ -30,17 +30,17 @@ collections:
 zabbix-config:
     ansible-playbook -i inventory.local.ini zabbix-config.yml
 
-verify:
-    ansible-playbook -i inventory.local.ini verify.yml {{sudo_flags}}
+verify cluster="":
+    ansible-playbook -i inventory.local.ini verify.yml {{ if cluster == "" { "" } else { "-e cluster=" + cluster } }} {{sudo_flags}}
 
-switchover candidate:
-    ansible-playbook -i inventory.local.ini switchover.yml -e candidate={{candidate}} {{sudo_flags}}
+switchover candidate cluster="":
+    ansible-playbook -i inventory.local.ini switchover.yml -e candidate={{candidate}} {{ if cluster == "" { "" } else { "-e cluster=" + cluster } }} {{sudo_flags}}
 
-events:
-    ansible-playbook -i inventory.local.ini events.yml {{sudo_flags}}
+events cluster="":
+    ansible-playbook -i inventory.local.ini events.yml {{ if cluster == "" { "" } else { "-e cluster=" + cluster } }} {{sudo_flags}}
 
-stop:
-    ansible-playbook -i inventory.local.ini power.yml -e lab_state=stopped {{sudo_flags}}
+stop cluster="":
+    ansible-playbook -i inventory.local.ini power.yml -e lab_state=stopped {{ if cluster == "" { "" } else { "-e cluster=" + cluster } }} {{sudo_flags}}
 
-start:
-    ansible-playbook -i inventory.local.ini power.yml -e lab_state=started {{sudo_flags}}
+start cluster="":
+    ansible-playbook -i inventory.local.ini power.yml -e lab_state=started {{ if cluster == "" { "" } else { "-e cluster=" + cluster } }} {{sudo_flags}}

@@ -42,8 +42,11 @@ ssh -p ПОРТ_ПЕРВОЙ_ВМ -N -L 8080:IP_1:80 student@ВНЕШНИЙ_АД
 **Проверка записи.** На ВМ `zabbix` агент выполняет `psql` по трём узлам с `target_session_attrs=read-write`: libpq сам находит лидера, как клиент. Роль `zbx_monitor` (член `pg_monitor`), пароль в `/etc/zabbix/zabbix.pgpass` (0600, владелец zabbix):
 
 ```
-UserParameter=pgsql.write_available,PGPASSFILE=/etc/zabbix/zabbix.pgpass psql "host=IP_1,IP_2,IP_3 port=5432 dbname=postgres user=zbx_monitor target_session_attrs=read-write connect_timeout=3" -XAtqc "select 1" 2>/dev/null || echo 0
+UserParameter=pgsql.write_available[*],PGPASSFILE=/etc/zabbix/zabbix.pgpass psql "host=$1 port=$2 dbname=postgres user=zbx_monitor target_session_attrs=read-write connect_timeout=3" -XAtqc "select 1" 2>/dev/null || echo 0
 ```
+
+`[*]` делает ключ параметризованным: `$1` — список узлов кластера, `$2` — порт. Одна строка обслуживает все кластеры, в Zabbix у каждого свой элемент `pgsql.write_available["IP_1,IP_2,IP_3",5432]`.
+Чтобы хост Zabbix мог подключаться к чужим кластерам, `patroni.yml.j2` добавляет его адрес в `pg_hba` каждого кластера.
 
 В `zabbix-agent2` из Debian нет плагина PostgreSQL (`pgsql.ping` — Unknown metric), поэтому проверка через `UserParameter`.
 
@@ -52,21 +55,23 @@ UserParameter=pgsql.write_available,PGPASSFILE=/etc/zabbix/zabbix.pgpass psql "h
 | Объект | Настройка | Зачем |
 | --- | --- | --- |
 | группа `DBA SRE lab` | | права и фильтры |
-| шаблон `PostgreSQL port lab` | item `net.tcp.service[tcp,{HOST.IP},5432]`, 10s | один набор проверок на все узлы |
+| шаблон `PostgreSQL port lab` | item `net.tcp.service[tcp,{HOST.IP},{$PG.PORT}]`, 10s, макрос `{$PG.PORT}` = 5432 | один набор проверок на все узлы |
 | trigger в шаблоне | `last(...)=0`, High, тег `service=postgresql-node` | узел недоступен |
-| хосты `db01..db03` | интерфейс агента, шаблон, тег `cluster=demo` | |
-| item `pgsql.write_available` | 10s, на хосте `zabbix` | доступность для клиента |
-| trigger | `max(...,30s)=0`, Disaster, тег `service=postgresql-demo` | 30 секунд без записи — авария сервиса |
-| item `sli.write_availability` | Calculated, `avg(//pgsql.write_available,1h)*100`, % | SLI за час |
+| хосты `db01..db03` | интерфейс агента, шаблон, макрос `{$PG.PORT}` из `pg_port`, тег `cluster=demo` | |
+| item `pgsql.write_available["IP_1,IP_2,IP_3",5432]` | 10s, на хосте `zabbix`, по одному на кластер | доступность для клиента |
+| trigger `PostgreSQL demo does not accept writes` | `max(...,30s)=0`, Disaster, тег `service=postgresql-demo` | 30 секунд без записи — авария сервиса |
+| item `sli.write_availability[demo]` | Calculated, `avg(//pgsql.write_available[...],1h)*100`, % | SLI за час |
 | service `PostgreSQL demo cluster` | проблемы с тегом `service=postgresql-demo` | что обещаем |
-| SLA `PostgreSQL 99.9` | SLO 99,9, неделя | отчёт Services → SLA report |
+| SLA `PostgreSQL demo 99.9` | SLO 99,9, неделя | отчёт Services → SLA report |
+
+Для каждого кластера из группы `database` создаётся свой набор: проверка записи, SLI, trigger, service и SLA.
 
 Для SLA в `community.zabbix` нет модуля, он создаётся через API модулем `uri`.
 
 ## Проверка
 
 ```bash
-sudo -u zabbix zabbix_agent2 -t pgsql.write_available     # на ВМ zabbix: [s|1]
+sudo -u zabbix zabbix_agent2 -t 'pgsql.write_available["IP_1,IP_2,IP_3",5432]'   # на ВМ zabbix: [s|1]
 zabbix_agent2 -t net.tcp.service[tcp,IP_1,5432]           # на узле: [s|1]
 ```
 
@@ -116,4 +121,5 @@ sudo systemctl restart apache2
 
 - пароль `Admin` положите в `credentials/zabbix-admin`;
 - если имена хостов в Zabbix отличаются от имён в inventory, задайте их переменной хоста: `db01 ansible_host=... zabbix_host_name=sre-t-1`;
-- если служебная база в другом экземпляре, задайте `zabbix_db_cluster` и `zabbix_db_port` в `vars.yml`.
+- если служебная база в другом экземпляре, задайте `zabbix_db_cluster` и `zabbix_db_port` в `vars.yml`;
+- имена объектов включают `cluster_name`: на сервере, где объекты создавались вручную, появятся новые рядом со старыми.

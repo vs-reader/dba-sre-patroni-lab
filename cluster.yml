@@ -13,8 +13,8 @@
           Authorization: "Bearer {{ grafana_token }}"
         body_format: json
         body:
-          tags: [ansible, cluster.yml]
-          text: "Ansible cluster.yml started, commit {{ git_commit }}"
+          tags: [ansible, cluster.yml, "{{ cluster_group }}"]
+          text: "Ansible cluster.yml {{ cluster_group }} started, commit {{ git_commit }}"
       register: run_annotation
       when: grafana_token | length > 0
       ignore_errors: true
@@ -26,7 +26,7 @@
       when: run_annotation is failed
 
 - name: Configure etcd, PostgreSQL and Patroni
-  hosts: database
+  hosts: "{{ cluster | default('database1') }}"
   become: true
   gather_facts: false
   any_errors_fatal: true
@@ -36,8 +36,8 @@
     - name: Require three database nodes
       ansible.builtin.assert:
         that:
-          - groups['database'] | length == 3
-        fail_msg: "The database group must contain exactly three nodes"
+          - groups[cluster_group] | length == 3
+        fail_msg: "The {{ cluster_group }} group must contain exactly three nodes"
       run_once: true
 
     - name: Check for an existing PostgreSQL 17 main cluster
@@ -114,7 +114,7 @@
           ETCD_LISTEN_CLIENT_URLS=http://{{ ansible_host }}:2379,http://127.0.0.1:2379
           ETCD_ADVERTISE_CLIENT_URLS=http://{{ ansible_host }}:2379
           ETCD_INITIAL_ADVERTISE_PEER_URLS=http://{{ ansible_host }}:2380
-          ETCD_INITIAL_CLUSTER={% for host in groups['database'] %}{{ host }}=http://{{ hostvars[host].ansible_host }}:2380{{ ',' if not loop.last }}{% endfor %}
+          ETCD_INITIAL_CLUSTER={% for host in groups[cluster_group] %}{{ host }}=http://{{ hostvars[host].ansible_host }}:2380{{ ',' if not loop.last }}{% endfor %}
 
           ETCD_INITIAL_CLUSTER_TOKEN={{ cluster_name }}-etcd
           ETCD_INITIAL_CLUSTER_STATE=new
@@ -197,7 +197,7 @@
         body_format: json
         body:
           timeEnd: "{{ (now().timestamp() * 1000) | int }}"
-          text: "Ansible cluster.yml finished, commit {{ git_commit }}"
+          text: "Ansible cluster.yml {{ cluster_group }} finished, commit {{ git_commit }}"
       when: run_annotation.json.id is defined
       ignore_errors: true
       no_log: true

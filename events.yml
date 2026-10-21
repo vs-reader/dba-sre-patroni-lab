@@ -1,6 +1,6 @@
 ---
 - name: Show role change events in the journal
-  hosts: database
+  hosts: "{{ cluster | default('database1') }}"
   become: true
   gather_facts: false
   tasks:

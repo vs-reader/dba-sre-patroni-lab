@@ -220,7 +220,7 @@
         name: zabbix-agent2
         state: restarted
 
-- name: Check writes to the cluster from the Zabbix node
+- name: Check writes to each cluster from the Zabbix node
   hosts: zabbix
   become: true
   gather_facts: false
@@ -228,13 +228,13 @@
     - vars.yml
   vars:
     monitor_password: "{{ lookup('ansible.builtin.password', 'credentials/zbx-monitor chars=ascii_letters,digits length=24') }}"
-    cluster_hosts: "{{ groups['database'] | map('extract', hostvars, 'ansible_host') | join(',') }}"
+    clusters: "{{ groups['database'] | map('extract', hostvars) | groupby('cluster_name') }}"
   tasks:
-    - name: Create the monitoring role on the leader
+    - name: Create the monitoring role on each leader
       ansible.builtin.command:
         argv:
           - psql
-          - "host={{ cluster_hosts }} port={{ pg_port }} dbname=postgres user=postgres target_session_attrs=read-write"
+          - "host={{ item.1 | map(attribute='ansible_host') | join(',') }} port={{ item.1[0].pg_port }} dbname=postgres user=postgres target_session_attrs=read-write"
           - -XAtq
           - -v
           - ON_ERROR_STOP=1
@@ -245,6 +245,9 @@
           ALTER ROLE zbx_monitor PASSWORD '{{ monitor_password }}';
       environment:
         PGPASSWORD: "{{ lookup('ansible.builtin.password', 'credentials/postgres chars=ascii_letters,digits length=24') }}"
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.0 }}"
       changed_when: false
       no_log: true
 
@@ -263,18 +266,26 @@
         dest: /etc/zabbix/zabbix_agent2.d/postgresql.conf
         mode: '0644'
         content: |
-          UserParameter=pgsql.write_available,PGPASSFILE=/etc/zabbix/zabbix.pgpass psql "host={{ cluster_hosts }} port={{ pg_port }} dbname=postgres user=zbx_monitor target_session_attrs=read-write connect_timeout=3" -XAtqc "select 1" 2>/dev/null || echo 0
+          # pgsql.write_available["host1,host2,host3",port]
+          UserParameter=pgsql.write_available[*],PGPASSFILE=/etc/zabbix/zabbix.pgpass psql "host=$1 port=$2 dbname=postgres user=zbx_monitor target_session_attrs=read-write connect_timeout=3" -XAtqc "select 1" 2>/dev/null || echo 0
       notify: Restart Zabbix agent 2
 
     - name: Apply the agent configuration now
       ansible.builtin.meta: flush_handlers
 
     - name: Check writes through the agent
-      ansible.builtin.command: zabbix_agent2 -t pgsql.write_available
+      ansible.builtin.command:
+        argv:
+          - zabbix_agent2
+          - -t
+          - 'pgsql.write_available["{{ item.1 | map(attribute=''ansible_host'') | join('','') }}",{{ item.1[0].pg_port }}]'
       become_user: zabbix
       register: write_check
       changed_when: false
       failed_when: "'[s|1]' not in write_check.stdout"
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.0 }}"
 
   handlers:
     - name: Restart Zabbix agent 2

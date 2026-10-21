@@ -56,6 +56,7 @@
     ansible_user: Admin
     ansible_httpapi_pass: "{{ lookup('ansible.builtin.password', 'credentials/zabbix-admin chars=ascii_letters,digits length=20') }}"
     service_host: "{{ hostvars[groups['zabbix'][0]].zabbix_host_name | default(groups['zabbix'][0]) }}"
+    clusters: "{{ groups['database'] | map('extract', hostvars) | groupby('cluster_name') }}"
   tasks:
     - name: Create the host group
       community.zabbix.zabbix_group:
@@ -68,13 +69,22 @@
         template_groups:
           - Templates
 
+    - name: Set the default PostgreSQL port in the template
+      community.zabbix.zabbix_template:
+        template_name: PostgreSQL port lab
+        template_groups:
+          - Templates
+        macros:
+          - macro: "{$PG.PORT}"
+            value: "5432"
+
     - name: Check the PostgreSQL port on each node
       community.zabbix.zabbix_item:
-        name: "PostgreSQL port {{ pg_port }}"
+        name: PostgreSQL port
         template_name: PostgreSQL port lab
         params:
           type: zabbix_agent
-          key: "net.tcp.service[tcp,{HOST.IP},{{ pg_port }}]"
+          key: "net.tcp.service[tcp,{HOST.IP},{$PG.PORT}]"
           value_type: numeric_unsigned
           interval: 10s
 
@@ -84,7 +94,7 @@
         template_name: PostgreSQL port lab
         params:
           severity: high
-          expression: "last(/PostgreSQL port lab/net.tcp.service[tcp,{HOST.IP},{{ pg_port }}])=0"
+          expression: "last(/PostgreSQL port lab/net.tcp.service[tcp,{HOST.IP},{$PG.PORT}])=0"
           tags:
             - tag: service
               value: postgresql-node
@@ -103,55 +113,70 @@
             ip: "{{ hostvars[item].ansible_host }}"
             dns: ""
             port: "10050"
+        macros:
+          - macro: "{$PG.PORT}"
+            value: "{{ hostvars[item].pg_port }}"
         tags:
           - tag: cluster
-            value: "{{ cluster_name }}"
+            value: "{{ hostvars[item].cluster_name }}"
       loop: "{{ groups['database'] }}"
 
-    - name: Check writes to the cluster
+    - name: Check writes to each cluster
       community.zabbix.zabbix_item:
-        name: PostgreSQL write available (service)
+        name: "PostgreSQL {{ item.0 }} write available"
         host_name: "{{ service_host }}"
         params:
           type: zabbix_agent
-          key: pgsql.write_available
+          key: 'pgsql.write_available["{{ item.1 | map(attribute=''ansible_host'') | join('','') }}",{{ item.1[0].pg_port }}]'
           value_type: numeric_unsigned
           interval: 10s
           interface:
             main: true
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.0 }}"
 
     - name: Calculate the write availability SLI
       community.zabbix.zabbix_item:
-        name: SLI write availability 1h
+        name: "SLI {{ item.0 }} write availability 1h"
         host_name: "{{ service_host }}"
         params:
           type: calculated
-          key: sli.write_availability
+          key: "sli.write_availability[{{ item.0 }}]"
           value_type: numeric_float
           interval: 1m
           units: "%"
-          params: "avg(//pgsql.write_available,1h)*100"
+          params: 'avg(//pgsql.write_available["{{ item.1 | map(attribute=''ansible_host'') | join('','') }}",{{ item.1[0].pg_port }}],1h)*100'
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.0 }}"
 
-    - name: Raise a problem when the cluster does not accept writes
+    - name: Raise a problem when a cluster does not accept writes
       community.zabbix.zabbix_trigger:
-        name: PostgreSQL cluster does not accept writes
+        name: "PostgreSQL {{ item.0 }} does not accept writes"
         host_name: "{{ service_host }}"
         params:
           severity: disaster
-          expression: "max(/{{ service_host }}/pgsql.write_available,30s)=0"
+          expression: 'max(/{{ service_host }}/pgsql.write_available["{{ item.1 | map(attribute=''ansible_host'') | join('','') }}",{{ item.1[0].pg_port }}],30s)=0'
           tags:
             - tag: service
-              value: postgresql-demo
+              value: "postgresql-{{ item.0 }}"
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.0 }}"
 
-    - name: Create the service for the SLA
+    - name: Create a service for each cluster
       community.zabbix.zabbix_service:
-        name: PostgreSQL demo cluster
+        name: "PostgreSQL {{ item.0 }} cluster"
         algorithm: most_crit_of_child_serv
         sortorder: 0
         weight: 0
         problem_tags:
           - tag: service
-            value: postgresql-demo
+            value: "postgresql-{{ item.0 }}"
+      loop: "{{ clusters }}"
+      loop_control:
+        label: "{{ item.0 }}"
 
 - name: Create the SLA
   hosts: zabbix
@@ -172,17 +197,17 @@
       failed_when: login.json.result is not defined
       no_log: true
 
-    - name: Find the SLA
+    - name: Find the SLAs
       ansible.builtin.uri:
         url: "{{ zabbix_api }}"
         method: POST
         body_format: json
         headers:
           Authorization: "Bearer {{ login.json.result }}"
-        body: {"jsonrpc": "2.0", "method": "sla.get", "params": {"filter": {"name": "PostgreSQL 99.9"}}, "id": 1}
+        body: {"jsonrpc": "2.0", "method": "sla.get", "params": {"output": ["name"]}, "id": 1}
       register: sla
 
-    - name: Create the SLA
+    - name: Create an SLA for each cluster
       ansible.builtin.uri:
         url: "{{ zabbix_api }}"
         method: POST
@@ -194,7 +219,7 @@
           method: sla.create
           id: 1
           params:
-            name: PostgreSQL 99.9
+            name: "PostgreSQL {{ item }} 99.9"
             slo: "99.9"
             period: 1
             timezone: system
@@ -202,8 +227,9 @@
             service_tags:
               - tag: name
                 operator: 0
-                value: PostgreSQL demo cluster
+                value: "PostgreSQL {{ item }} cluster"
       register: sla_create
-      when: sla.json.result | length == 0
+      loop: "{{ groups['database'] | map('extract', hostvars, 'cluster_name') | unique }}"
+      when: ("PostgreSQL " ~ item ~ " 99.9") not in (sla.json.result | map(attribute='name'))
       failed_when: sla_create.json.result is not defined
       changed_when: true
