@@ -85,7 +85,7 @@ just stop database2
 - `monitoring.yml`: Prometheus и Grafana на одной ВМ, отдельно от кластера.
 - `verify.yml`, `switchover.yml`, `events.yml`: проверка, переключение, показ события.
 - `power.yml`: остановка и запуск служб без удаления данных.
-- `logging.yml`, `templates/vector.yaml.j2`, `templates/loki.yml.j2`: сбор логов, см. [docs/logging.md](docs/logging.md).
+- `logging.yml`, `templates/vector.yaml.j2`, `templates/loki.yml.j2`: сбор логов, см. [docs/logging.md](docs/logging.md) и [docs/vector.md](docs/vector.md).
 - `zabbix.yml`, `zabbix-config.yml`, `requirements.yml`: Zabbix и SLI доступности записи, см. [docs/zabbix.md](docs/zabbix.md).
 
 Пароли создаются при первом запуске в `credentials/` и не попадают в Git.

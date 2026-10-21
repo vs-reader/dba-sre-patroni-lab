@@ -114,6 +114,14 @@
       ansible.builtin.apt:
         deb: /var/cache/apt/archives/vector.deb
 
+    - name: Let Vector read the Grafana log
+      ansible.builtin.user:
+        name: vector
+        groups: grafana
+        append: true
+      when: inventory_hostname in groups['monitoring']
+      notify: Restart Vector
+
     - name: Configure Vector
       ansible.builtin.template:
         src: vector.yaml.j2

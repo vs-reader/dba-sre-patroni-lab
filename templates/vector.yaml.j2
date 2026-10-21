@@ -1,59 +1,55 @@
-# Patroni, PostgreSQL and role-event lines from journald to Loki.
+# Logs to Loki: Patroni journal on every node, Grafana log file on the monitoring node.
 sources:
-  patroni_journal:
+  patroni:
     type: journald
     include_units:
       - patroni.service
+{% if inventory_hostname in groups['monitoring'] %}
+
+  grafana:
+    type: file
+    include:
+      - /var/log/grafana/grafana.log
+{% endif %}
 
 transforms:
-  parse:
-    type: remap
-    inputs:
-      - patroni_journal
-    source: |
-      line = string!(.message)
-      component = "patroni"
-      level = "INFO"
-      if .SYSLOG_IDENTIFIER == "patroni-role" {
-        component = "role-event"
-        if contains(line, "failed") { level = "WARNING" }
-      } else if match(line, r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ \w+ \[\d+\]') {
-        component = "postgresql"
-        level = parse_regex(line, r'\] (?P<lvl>[A-Z]+):').lvl ?? "LOG"
-      } else {
-        level = parse_regex(line, r'^\S+ \S+ (?P<lvl>[A-Z]+):').lvl ?? "INFO"
-      }
-      event = {
-        "timestamp": .timestamp,
-        "message": line,
-        "cluster": "{{ cluster_name }}",
-        "node": "{{ inventory_hostname }}",
-        "component": component,
-        "level": level
-      }
-      slow, err = parse_regex(line, r'duration: (?P<ms>[\d.]+) ms')
-      if err == null {
-        event.duration_ms = to_float!(slow.ms)
-      }
-      . = event
-
   drop_noise:
     type: filter
     inputs:
-      - parse
+      - patroni
     condition: '!contains(string!(.message), "no action. I am")'
 
-sinks:
-  loki:
-    type: loki
+  add_info:
+    type: remap
     inputs:
       - drop_noise
+    source: |
+      .env = "lab"
+      .message = "[" + .env + "] " + string!(.message)
+
+sinks:
+  loki_patroni:
+    type: loki
+    inputs:
+      - add_info
     endpoint: {{ loki_url }}
     encoding:
-      codec: json
-    remove_label_fields: true
+      codec: text
     labels:
-      cluster: "{{ '{{' }} cluster {{ '}}' }}"
-      node: "{{ '{{' }} node {{ '}}' }}"
-      component: "{{ '{{' }} component {{ '}}' }}"
-      level: "{{ '{{' }} level {{ '}}' }}"
+      cluster: {{ cluster_name }}
+      node: {{ inventory_hostname }}
+      app: patroni
+      env: "{{ '{{' }} env {{ '}}' }}"
+{% if inventory_hostname in groups['monitoring'] %}
+
+  loki_grafana:
+    type: loki
+    inputs:
+      - grafana
+    endpoint: {{ loki_url }}
+    encoding:
+      codec: text
+    labels:
+      node: {{ inventory_hostname }}
+      app: grafana
+{% endif %}

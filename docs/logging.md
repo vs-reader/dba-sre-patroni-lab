@@ -1,21 +1,19 @@
-# Логи Patroni и PostgreSQL: Vector и Loki
+# Логи: Vector и Loki
 
-Vector на каждом узле читает журнал службы `patroni.service`, отбрасывает шум, расставляет метки и отправляет строки в Loki. Grafana показывает их рядом с метриками.
+Vector читает логи на узлах, отбрасывает шум и отправляет строки в Loki. Grafana показывает их рядом с метриками.
 
 ```
 узлы db01..db03                                   ВМ monitoring
-journald: patroni.service   ──►   Vector   ──►   Loki :3100   ──►   Grafana
-(Patroni, PostgreSQL,             разбор,        хранение 48 ч      Explore, панели
- обработчик role-event)           фильтр, метки
+journald: patroni.service ──►  Vector  ──►  Loki :3100  ──►  Grafana
+/var/log/grafana/grafana.log ─┘ (monitoring)  хранение 48 ч    Explore
 ```
 
-В одном журнале пишут три источника:
+Два источника:
 
-| Компонент | Пример строки |
-| --- | --- |
-| Patroni | `2026-10-21 10:59:58,707 INFO: no action. I am (db01), a secondary, ...` |
-| PostgreSQL | `2026-10-21 08:18:37.009 UTC [4601] ERROR:  division by zero` |
-| Обработчик `role-event` | `action=on_role_change node=db03 role=primary previous=none cluster=demo` |
+| Источник | Что в нём | Пример строки |
+| --- | --- | --- |
+| журнал `patroni.service` | Patroni, PostgreSQL под ним, обработчик `role-event` | `2026-10-21 08:18:37.009 UTC [4601] ERROR:  division by zero` |
+| файл `/var/log/grafana/grafana.log` | Grafana, только на ВМ `monitoring` | `logger=context t=... level=info msg="Request Completed" ...` |
 
 87 % строк Patroni — служебное «no action. I am…» раз в 10 секунд. Vector их не отправляет.
 
@@ -27,7 +25,11 @@ journald: patroni.service   ──►   Vector   ──►   Loki :3100   ──
 just logging
 ```
 
-`logging.yml` ставит Loki на ВМ `monitoring`, Vector на узлы `database` и добавляет источник Loki в Grafana. Версии и контрольные суммы — в `vars.yml`.
+`logging.yml` ставит Loki на ВМ `monitoring`, Vector на узлы `database`, добавляет пользователя `vector` в группу `grafana` (чтобы читать файл Grafana) и подключает источник Loki в Grafana. Версии и контрольные суммы — в `vars.yml`.
+
+## Конфигурация Vector
+
+`templates/vector.yaml.j2`: журнал `patroni.service` на всех узлах и файл Grafana на ВМ `monitoring`, фильтр строк «no action», поле `env` и метки `cluster`, `node`, `app`, `env`. Разбор конфигурации и базовые примеры — в [vector.md](vector.md).
 
 ## Установка вручную
 
@@ -41,7 +43,7 @@ sudo apt-get install -y ./loki_3.7.9_amd64.deb
 sudo install -d -o loki -g nogroup -m 750 /var/lib/loki
 ```
 
-Пакет сразу запускает Loki с учебной конфигурацией: данные в `/tmp/loki`, уровень журнала `debug`. Замените `/etc/loki/config.yml` содержимым `templates/loki.yml.j2`, подставив вместо `{{ ansible_host }}` адрес ВМ:
+Пакет запускает Loki с учебной конфигурацией: данные в `/tmp/loki`, уровень журнала `debug`. Замените `/etc/loki/config.yml` содержимым `templates/loki.yml.j2`, подставив адрес ВМ вместо `{{ ansible_host }}`:
 
 ```bash
 sudo nano /etc/loki/config.yml
@@ -49,7 +51,7 @@ sudo systemctl restart loki
 curl http://IP_1:3100/ready
 ```
 
-Ожидаем `ready`. Первые 15 секунд Loki отвечает `Ingester not ready`, это нормально.
+Ожидаем `ready`. Первые 15 секунд Loki отвечает `Ingester not ready`.
 
 ### Vector (каждый узел)
 
@@ -60,21 +62,18 @@ echo "985f74a8e07ac8efabc891324435451823e77da5b98b636bd7594f402db41219  vector_0
 sudo apt-get install -y ./vector_0.60.0-1_amd64.deb
 ```
 
-Пакет создаёт пользователя `vector` в группе `systemd-journal`, поэтому журнал он читает без дополнительных прав. Служба после установки не запущена.
+Пакет создаёт пользователя `vector` в группе `systemd-journal`: журнал он читает без дополнительных прав. На ВМ monitoring ещё:
 
-Скопируйте `templates/vector.yaml.j2` в `/etc/vector/vector.yaml` и замените:
-- `{{ cluster_name }}` на `demo`,
-- `{{ inventory_hostname }}` на имя узла (`db01`),
-- `{{ loki_url }}` на `http://IP_1:3100`,
-- `{{ '{{' }} cluster {{ '}}' }}` и остальные метки в `sinks.loki.labels` на `{{ cluster }}`, `{{ node }}` и т. д.
+```bash
+sudo usermod -aG grafana vector
+```
+
+Запишите в `/etc/vector/vector.yaml` конфигурацию по образцу `templates/vector.yaml.j2` со своими адресом и именем узла (источник и получатель Grafana — только на ВМ monitoring), затем:
 
 ```bash
 sudo vector validate --no-environment /etc/vector/vector.yaml
 sudo systemctl enable --now vector
-journalctl -u vector -n 20
 ```
-
-Ожидаем `Validated` и службу `active`.
 
 ### Источник в Grafana
 
@@ -82,19 +81,25 @@ Connections → Data sources → Add → Loki, URL `http://IP_1:3100` → Save &
 
 ## Проверка
 
-В Grafana: Explore → источник Loki.
+Grafana → Explore → источник Loki:
 
 ```logql
-{cluster="demo", component="role-event"}
+{app="patroni"} |= "on_role_change"
 ```
 
 После `just switchover db02` — две строки: `role=primary` на новом лидере и `role=replica` на прежнем.
 
 ```logql
-{cluster="demo"} |= "no action"
+{app="patroni"} |= "no action"
 ```
 
-Пусто: шум отфильтрован Vector.
+Пусто: шум отфильтрован.
+
+```logql
+{app="grafana"}
+```
+
+Строки из файла Grafana.
 
 Ошибка и медленный запрос для проверки (на лидере; если порт изменён, добавьте `-p` с `pg_port`):
 
@@ -104,145 +109,75 @@ sudo -u postgres psql -Xq -c "set log_min_duration_statement = 0" -c "select pg_
 ```
 
 ```logql
-{cluster="demo", component="postgresql", level="ERROR"}
-{cluster="demo", component="postgresql"} | json | duration_ms > 200
+{app="patroni"} |= "ERROR:"
+{app="patroni"} |= "duration:" | regexp `duration: (?P<ms>[\d.]+) ms` | ms > 200
 ```
 
 Без Grafana — через API Loki:
 
 ```bash
 curl -s -G http://IP_1:3100/loki/api/v1/query_range \
-  --data-urlencode 'query={cluster="demo", component="role-event"}' \
+  --data-urlencode 'query={app="patroni"} |= "on_role_change"' \
   --data-urlencode 'since=1h'
-curl -s http://IP_1:3100/loki/api/v1/label/component/values
+curl -s http://IP_1:3100/loki/api/v1/label/app/values
 ```
 
 ## LogQL: основы
 
-Запрос состоит из выбора потоков и конвейера обработки:
+Запрос — выбор потоков по меткам и конвейер обработки:
 
 ```
 {метки}  | фильтры  | разбор  | условия  | формат
 ```
 
-**Выбор потоков** — обязательная часть, по меткам:
+**Выбор потоков:**
 
 ```logql
-{cluster="demo"}                          равно
-{component!="patroni"}                    не равно
-{level=~"ERROR|FATAL|PANIC"}              регулярное выражение
-{cluster="demo", node!~"db0[12]"}         не совпадает
+{app="patroni"}                           равно
+{app!="grafana", env="lab"}               не равно
+{node=~"db0[12]", app="patroni"}          регулярное выражение
+{app="patroni", node!~"db03"}             не совпадает
 ```
 
 Хотя бы одна метка должна быть с `=` или `=~`, иначе Loki отклонит запрос.
 
-**Фильтры по тексту строки** — самые быстрые после меток:
+**Фильтры по тексту** — самые быстрые после меток:
 
 ```logql
-{cluster="demo"} |= "timeout"             содержит
-{cluster="demo"} != "checkpoint"          не содержит
-{cluster="demo"} |~ "(?i)connection.*refused"   регулярное выражение
-{cluster="demo"} !~ "LOG:  (checkpoint|connection)"
+{app="patroni"} |= "ERROR"                содержит
+{app="patroni"} != "checkpoint"           не содержит
+{app="patroni"} |~ "ERROR|FATAL"          регулярное выражение
+{app="patroni"} !~ "LOG:  (checkpoint|connection)"
 ```
 
-**Разбор** — превращает строку в поля:
+**Разбор строки в поля:**
 
 ```logql
-| json                                    поля из JSON
-| logfmt                                  key=value
-| regexp `role=(?P<role>\w+)`             именованные группы
-| pattern "<_> <_> <_> [<pid>] <lvl>:  <msg>"   по шаблону
-```
-
-Строки в нашем Loki — JSON: `{"message": "...", "duration_ms": 301.9}`. Чтобы разбирать сам текст, сначала достаём его: `| json | line_format "{{.message}}"`.
-
-**Условия по полям** после разбора:
-
-```logql
-{component="postgresql"} | json | duration_ms > 200
-{component="role-event"} | json | line_format "{{.message}}" | logfmt | role="primary"
-{component="postgresql"} | json | line_format "{{.message}}" | pattern "<_> <_> <_> [<pid>] <lvl>:  <msg>" | lvl="ERROR"
+{app="grafana"} | logfmt | level="error"                       key=value
+{app="patroni"} |= "on_role_change" | regexp `role=(?P<role>\w+)` | role="primary"
+{app="patroni"} |= "UTC [" | pattern "<_> <_> <_> <_> [<pid>] <lvl>:  <msg>" | lvl="ERROR"
 ```
 
 **Форматирование вывода:**
 
 ```logql
-{component="role-event"} | json | line_format "{{.message}}" | logfmt | line_format "{{.node}} -> {{.role}}"
+{app="patroni"} |= "on_role_change" | regexp `node=(?P<n>\S+) role=(?P<role>\w+)` | line_format "{{.n}} -> {{.role}}"
 ```
 
 **Метрики из логов** — для панелей и оповещений:
 
 ```logql
-sum by (component) (count_over_time({cluster="demo"}[5m]))     строк за 5 минут
-sum by (node) (rate({level="ERROR"}[5m]))                      ошибок в секунду
-count_over_time({component="role-event"} |= "role=primary" [1h])   смен лидера за час
-quantile_over_time(0.95, {component="postgresql"} | json | unwrap duration_ms [10m]) by (node)
-                                                               95-й перцентиль длительности
+sum by (app) (count_over_time({app=~".+"}[5m]))                  строк за 5 минут
+sum by (node) (count_over_time({app="patroni"} |~ "ERROR|FATAL" [1h]))   ошибок за час
+count_over_time({app="patroni"} |= "role=primary" [1h])           смен лидера за час
+quantile_over_time(0.95, {app="patroni"} |= "duration:" | regexp `duration: (?P<ms>[\d.]+) ms` | unwrap ms [10m]) by (node)
+                                                                  95-й перцентиль длительности
 ```
 
-`unwrap` берёт числовое поле как значение для агрегации.
+`unwrap` берёт число из поля для агрегации.
 
-Метки должны быть с небольшим числом значений: кластер, узел, компонент, уровень. Номер процесса, текст запроса, длительность в метки не кладут — каждая уникальная комбинация меток создаёт отдельный поток и раздувает индекс Loki. Такие значения разбирают в запросе (`| json`, `| regexp`).
+Метки должны быть с небольшим числом значений: кластер, узел, приложение. Номер процесса, текст запроса, длительность в метки не кладут — каждая комбинация меток создаёт отдельный поток и раздувает индекс Loki. Такие значения разбирают в запросе.
 
-Loki 3 сам добавляет метки `service_name` (из `component`) и `detected_level` (из `level`).
+Loki 3 сам добавляет метки `service_name` (из `app`) и `detected_level` (уровень из текста строки).
 
-## Vector: основы
-
-Конфигурация — три вида блоков, связанных через `inputs`:
-
-```yaml
-sources:      откуда читать (journald, file, syslog, kafka ...)
-transforms:   что делать (remap, filter, route, sample, dedupe ...)
-sinks:        куда отправлять (loki, prometheus_exporter, file, console ...)
-```
-
-**remap** — изменение события на языке VRL (Vector Remap Language). Событие доступно как `.`, поля — `.message`, `.SYSLOG_IDENTIFIER`.
-
-```
-.env = "lab"                                  добавить поле
-del(.PRIORITY)                                удалить поле
-.level = upcase(string!(.level))              string! — проверка типа, ошибка останавливает событие
-.level = parse_regex(string!(.message), r'(?P<lvl>[A-Z]+):').lvl ?? "INFO"
-                                              ?? — значение по умолчанию при ошибке
-if contains(string!(.message), "FATAL") { .level = "FATAL" }
-parsed, err = parse_json(string!(.message))   ошибку можно обработать
-if err == null { .user = parsed.user }
-. = {"message": .message, "node": "db01"}     заменить событие целиком
-abort                                         отбросить событие
-```
-
-Функции с `!` останавливают обработку при ошибке, без `!` возвращают ошибку вторым значением или требуют `??`. VRL проверяет типы заранее: `vector validate` найдёт ошибку до запуска. Некоторые слова зарезервированы: переменную `duration` назвать нельзя.
-
-**filter** — пропустить только подходящие события:
-
-```yaml
-drop_noise:
-  type: filter
-  inputs: [parse]
-  condition: '!contains(string!(.message), "no action. I am")'
-```
-
-**route** — разложить поток по веткам:
-
-```yaml
-by_component:
-  type: route
-  inputs: [parse]
-  route:
-    postgresql: '.component == "postgresql"'
-    patroni: '.component == "patroni"'
-```
-
-Дальше `inputs: [by_component.postgresql]`.
-
-**Отладка:**
-
-```bash
-vector validate /etc/vector/vector.yaml       проверить конфигурацию
-vector tap --outputs-of parse                 события после transform в реальном времени
-vector top                                    сколько событий проходит через каждый блок
-```
-
-Для `tap` и `top` в конфигурацию добавляют `api: {enabled: true}`.
-
-Песочница VRL: https://playground.vrl.dev
+Документация LogQL: https://grafana.com/docs/loki/latest/query/
