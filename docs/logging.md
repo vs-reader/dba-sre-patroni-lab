@@ -3,16 +3,19 @@
 Vector читает логи на узлах, отбрасывает шум и отправляет строки в Loki. Grafana показывает их рядом с метриками.
 
 ```
-узлы db01..db03                                   ВМ monitoring
-journald: patroni.service ──►  Vector  ──►  Loki :3100  ──►  Grafana
-/var/log/grafana/grafana.log ─┘ (monitoring)  хранение 48 ч    Explore
+узлы db01..db03                                       ВМ monitoring
+journald: patroni.service ──────┐
+journald: etcd.service ─────────┼──►  Vector  ──►  Loki :3100  ──►  Grafana
+/var/log/grafana/grafana.log ───┘   (monitoring)   хранение 48 ч    Explore
+```
 ```
 
-Два источника:
+Три источника:
 
 | Источник | Что в нём | Пример строки |
 | --- | --- | --- |
 | журнал `patroni.service` | Patroni, PostgreSQL под ним, обработчик `role-event` | `2026-10-21 08:18:37.009 UTC [4601] ERROR:  division by zero` |
+| журнал `etcd.service` | etcd, строки в JSON | `{"level":"warn","ts":"...","msg":"slow fdatasync","took":"1.2s"}` |
 | файл `/var/log/grafana/grafana.log` | Grafana, только на ВМ `monitoring` | `logger=context t=... level=info msg="Request Completed" ...` |
 
 87 % строк Patroni — служебное «no action. I am…» раз в 10 секунд. Vector их не отправляет.
@@ -101,6 +104,23 @@ Grafana → Explore → источник Loki:
 
 Строки из файла Grafana.
 
+```logql
+{app="etcd"} | json | level=~"warn|error"
+```
+
+Предупреждения и ошибки etcd. Строки etcd в JSON, `| json` разбирает их в поля.
+Частые: `slow fdatasync` и `apply request took too long` — медленный диск,
+`lost leader`, `elected leader` — выборы лидера etcd.
+
+Строки `ERROR: Failed to decode request: http: invalid Read on closed Body` не в JSON,
+поля `level` у них нет, и запрос выше их не покажет. Их пишет HTTP-шлюз etcd:
+клиент закрыл соединение раньше, чем etcd дочитал запрос (например, Patroni прервал ожидание изменений). Обычно
+безвредны, если не совпадают по времени с ошибками Patroni:
+
+```logql
+{app="etcd"} |= "invalid Read on closed Body"
+```
+
 Ошибка и медленный запрос для проверки (на лидере; если порт изменён, добавьте `-p` с `pg_port`):
 
 ```bash
@@ -154,6 +174,7 @@ curl -s http://IP_1:3100/loki/api/v1/label/app/values
 
 ```logql
 {app="grafana"} | logfmt | level="error"                       key=value
+{app="etcd"} | json | level="warn"                              JSON
 {app="patroni"} |= "on_role_change" | regexp `role=(?P<role>\w+)` | role="primary"
 {app="patroni"} |= "UTC [" | pattern "<_> <_> <_> <_> [<pid>] <lvl>:  <msg>" | lvl="ERROR"
 ```

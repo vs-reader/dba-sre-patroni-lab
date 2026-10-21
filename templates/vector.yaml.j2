@@ -1,5 +1,5 @@
-# Vector: журнал Patroni на каждом узле и файл Grafana на ВМ monitoring
-# отправляются в Loki. Цепочка: sources -> transforms -> sinks,
+# Vector: журналы Patroni и etcd на каждом узле и файл Grafana на ВМ
+# monitoring отправляются в Loki. Цепочка: sources -> transforms -> sinks,
 # каждый блок указывает в inputs, откуда берёт строки.
 # Разбор с примерами — docs/vector.md.
 
@@ -11,6 +11,12 @@ sources:
     type: journald
     include_units:
       - patroni.service
+
+  # Журнал etcd. Если etcd на узле нет, источник просто пуст.
+  etcd:
+    type: journald
+    include_units:
+      - etcd.service
 {% if inventory_hostname in groups['monitoring'] %}
 
   # Файл журнала Grafana. Vector дочитывает новые строки и помнит
@@ -60,6 +66,19 @@ sinks:
       app: patroni
       # Значение метки из поля env, которое добавил add_info.
       env: "{{ '{{' }} env {{ '}}' }}"
+
+  # etcd отправляем без преобразований. Метки cluster нет:
+  # один etcd может обслуживать несколько кластеров Patroni.
+  loki_etcd:
+    type: loki
+    inputs:
+      - etcd
+    endpoint: {{ loki_url }}
+    encoding:
+      codec: text
+    labels:
+      node: {{ inventory_hostname }}
+      app: etcd
 {% if inventory_hostname in groups['monitoring'] %}
 
   # Файл Grafana отправляем без преобразований.
